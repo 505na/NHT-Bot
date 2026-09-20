@@ -21,6 +21,7 @@ if not AUTHORIZED_USER_ID:
 
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True
 
 client = discord.Client(intents=intents)
 

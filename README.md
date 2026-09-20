@@ -6,7 +6,7 @@ Bot wysyła wiadomość, gdy ktoś dołączy do serwera lub go opuści.
 
 1. Zainstaluj Python 3.10 lub nowszy.
 2. Utwórz aplikację i bota w [Discord Developer Portal](https://discord.com/developers/applications).
-3. Włącz **Server Members Intent** w zakładce `Bot`.
+3. Włącz **Server Members Intent** oraz **Message Content Intent** w zakładce `Bot`.
 4. Zaproś bota na serwer z uprawnieniami `View Channel` i `Send Messages`.
 5. W terminalu projektu uruchom:
 
