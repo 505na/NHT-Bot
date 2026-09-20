@@ -19,11 +19,14 @@ Copy-Item .env.example .env
 
 6. Otwórz `.env` i wpisz token bota w `DISCORD_TOKEN`.
 7. Ustaw `WELCOME_CHANNEL_ID` na ID kanału powitalnego, a `GOODBYE_CHANNEL_ID` na ID kanału pożegnalnego. Wartość `0` oznacza użycie kanału systemowego serwera.
-8. Włącz bota:
+8. Ustaw `AUTHORIZED_USER_ID` na ID osoby, która ma mieć dostęp do komend bota. Pozostali użytkownicy otrzymają komunikat o braku uprawnień. ID skopiujesz po włączeniu trybu deweloperskiego Discorda, klikając użytkownika prawym przyciskiem.
+9. Włącz bota:
 
 ```powershell
 python bot.py
 ```
+
+Komenda `!ping` jest dostępna wyłącznie dla użytkownika ustawionego w `AUTHORIZED_USER_ID`.
 
 Aby skopiować ID kanału, włącz tryb deweloperski Discorda, kliknij kanał prawym przyciskiem i wybierz **Kopiuj ID kanału**.
 

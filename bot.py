@@ -12,9 +12,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 TOKEN = os.getenv("DISCORD_TOKEN")
 WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
 GOODBYE_CHANNEL_ID = int(os.getenv("GOODBYE_CHANNEL_ID", "0"))
+AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "0"))
 
 if not TOKEN:
     raise RuntimeError("Brak DISCORD_TOKEN w pliku .env")
+if not AUTHORIZED_USER_ID:
+    raise RuntimeError("Brak AUTHORIZED_USER_ID w pliku .env")
 
 intents = discord.Intents.default()
 intents.members = True
@@ -37,6 +40,21 @@ def get_message_channel(guild: discord.Guild, channel_id: int) -> discord.TextCh
 @client.event
 async def on_ready() -> None:
     logging.info("Zalogowano jako %s", client.user)
+
+
+@client.event
+async def on_message(message: discord.Message) -> None:
+    if message.author.bot or not message.content.startswith("!"):
+        return
+
+    if message.author.id != AUTHORIZED_USER_ID:
+        await message.channel.send(
+            f"{message.author.mention}, nie masz uprawnień do używania tego bota."
+        )
+        return
+
+    if message.content.strip() == "!ping":
+        await message.channel.send("Pong!")
 
 
 @client.event
