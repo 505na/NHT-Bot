@@ -71,9 +71,7 @@ async def on_message(message: discord.Message) -> None:
         )
         return
 
-    if message.content.strip() == "!ping":
-        await message.channel.send("Pong!")
-    elif message.content.strip() == "!test":
+    if message.content.strip() == "!test":
         test_channel = client.get_channel(TEST_CHANNEL_ID)
         if not isinstance(test_channel, discord.TextChannel):
             logging.warning("Nie znaleziono kanału testowego %s", TEST_CHANNEL_ID)
@@ -87,6 +85,10 @@ async def on_message(message: discord.Message) -> None:
         await message.channel.send("Przeładowuję bota...")
         await client.close()
         reload_bot()
+    elif message.content.strip() == "!stop":
+        await message.channel.send("Zatrzymuję bota...")
+        await client.close()
+        os._exit(0)
     elif message.content.strip() == "!update":
         result = await asyncio.to_thread(update_bot)
         output = (result.stdout + result.stderr).strip()
@@ -111,7 +113,9 @@ async def on_member_join(member: discord.Member) -> None:
         logging.warning("Nie znaleziono kanału powitalnego na serwerze %s", member.guild.name)
         return
 
-    await channel.send(f"Witaj! {member.mention} miło cię widzieć na {member.guild.name}.")
+    await channel.send(
+        f"Witaj! {member.mention} ({member.name}) miło cię widzieć na {member.guild.name}."
+    )
 
 
 @client.event
@@ -121,7 +125,7 @@ async def on_member_remove(member: discord.Member) -> None:
         logging.warning("Nie znaleziono kanału pożegnalnego na serwerze %s", member.guild.name)
         return
 
-    await channel.send(f"Żegnaj {member.mention} nikt cię tu nie trzyma")
+    await channel.send(f"Żegnaj {member.mention} ({member.name}) nikt cię tu nie trzyma")
 
 
 async def run_bot() -> None:
