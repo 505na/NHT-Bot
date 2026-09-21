@@ -15,6 +15,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
 GOODBYE_CHANNEL_ID = int(os.getenv("GOODBYE_CHANNEL_ID", "0"))
 AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "0"))
+TEST_CHANNEL_ID = 1551275904280432683
 
 if not TOKEN:
     raise RuntimeError("Brak DISCORD_TOKEN w pliku .env")
@@ -72,6 +73,16 @@ async def on_message(message: discord.Message) -> None:
 
     if message.content.strip() == "!ping":
         await message.channel.send("Pong!")
+    elif message.content.strip() == "!test":
+        test_channel = client.get_channel(TEST_CHANNEL_ID)
+        if not isinstance(test_channel, discord.TextChannel):
+            logging.warning("Nie znaleziono kanału testowego %s", TEST_CHANNEL_ID)
+            return
+
+        latency_ms = round(client.latency * 1000)
+        await test_channel.send(
+            f"Test bota zakończony pomyślnie. Bot działa poprawnie. Opóźnienie: {latency_ms} ms."
+        )
     elif message.content.strip() == "!reload":
         await message.channel.send("Przeładowuję bota...")
         await client.close()
