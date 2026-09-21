@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import subprocess
+import sys
 
 import discord
 from dotenv import load_dotenv
@@ -24,6 +26,20 @@ intents.members = True
 intents.message_content = True
 
 client = discord.Client(intents=intents)
+BOT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+
+
+def reload_bot() -> None:
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+def update_bot() -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", BOT_DIRECTORY, "pull", "--ff-only"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def get_message_channel(guild: discord.Guild, channel_id: int) -> discord.TextChannel | None:
@@ -56,6 +72,25 @@ async def on_message(message: discord.Message) -> None:
 
     if message.content.strip() == "!ping":
         await message.channel.send("Pong!")
+    elif message.content.strip() == "!reload":
+        await message.channel.send("Przeładowuję bota...")
+        await client.close()
+        reload_bot()
+    elif message.content.strip() == "!update":
+        result = await asyncio.to_thread(update_bot)
+        output = (result.stdout + result.stderr).strip()
+
+        if result.returncode != 0:
+            logging.error("Aktualizacja bota nie powiodła się: %s", output)
+            await message.channel.send(
+                "Aktualizacja nie powiodła się. Sprawdź logi bota."
+            )
+            return
+
+        logging.info("Zaktualizowano bota z GitHub: %s", output or "brak zmian")
+        await message.channel.send("Bot został zaktualizowany. Przeładowuję...")
+        await client.close()
+        reload_bot()
 
 
 @client.event
