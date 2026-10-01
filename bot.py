@@ -16,6 +16,7 @@ WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
 GOODBYE_CHANNEL_ID = int(os.getenv("GOODBYE_CHANNEL_ID", "0"))
 AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "0"))
 TEST_CHANNEL_ID = 1551275904280432683
+LOG_CHANNEL_ID = 1555304186231521341
 
 if not TOKEN:
     raise RuntimeError("Brak DISCORD_TOKEN w pliku .env")
@@ -58,6 +59,7 @@ def get_message_channel(guild: discord.Guild, channel_id: int) -> discord.TextCh
 @client.event
 async def on_ready() -> None:
     logging.info("Zalogowano jako %s", client.user)
+    await client.change_presence(activity=discord.Game(name="by 505na"))
 
 
 @client.event
@@ -108,12 +110,41 @@ async def on_message(message: discord.Message) -> None:
 
 @client.event
 async def on_member_join(member: discord.Member) -> None:
-    channel = get_message_channel(member.guild, WELCOME_CHANNEL_ID)
-    if channel is None:
+    log_channel = get_message_channel(member.guild, LOG_CHANNEL_ID)
+    if log_channel is not None:
+        joined_at = member.joined_at or discord.utils.utcnow()
+        created_at = member.created_at
+        age_days = max(int((discord.utils.utcnow() - created_at).total_seconds() // 86400), 0)
+        years, remaining_days = divmod(age_days, 365)
+        months, days = divmod(remaining_days, 30)
+
+        age_parts = []
+        if years:
+            age_parts.append(f"{years} year{'s' if years != 1 else ''}")
+        if months:
+            age_parts.append(f"{months} month{'s' if months != 1 else ''}")
+        if days or not age_parts:
+            age_parts.append(f"{days} day{'s' if days != 1 else ''}")
+
+        embed = discord.Embed(
+            title="Member Joined",
+            description=f"{member.mention}",
+            color=discord.Color.dark_theme(),
+            timestamp=joined_at,
+        )
+        embed.set_author(name="Dyna APL")
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Account Age", value=", ".join(age_parts), inline=False)
+        embed.add_field(name="ID", value=str(member.id), inline=False)
+        embed.set_footer(text=f"{joined_at.strftime('%d.%m.%Y %H:%M')}")
+        await log_channel.send(embed=embed)
+
+    welcome_channel = get_message_channel(member.guild, WELCOME_CHANNEL_ID)
+    if welcome_channel is None:
         logging.warning("Nie znaleziono kanału powitalnego na serwerze %s", member.guild.name)
         return
 
-    await channel.send(
+    await welcome_channel.send(
         f"Witaj! {member.mention} ({member.name}) miło cię widzieć na {member.guild.name}."
     )
 
