@@ -82,6 +82,18 @@ async def on_message(message: discord.Message) -> None:
         await test_channel.send(
             f"Test bota zakończony pomyślnie. Bot działa poprawnie. Opóźnienie: {latency_ms} ms."
         )
+
+        embed = discord.Embed(
+            title="Member Joined",
+            description="@wtajemniczona wtajemniczona15",
+            color=discord.Color.from_rgb(15, 16, 19),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_author(name="Member Joined", icon_url="https://cdn.discordapp.com/emojis/1374002125509664829.png")
+        embed.add_field(name="Account Age", value="4 years, 0 months, 14 days", inline=False)
+        embed.add_field(name="ID", value="100687914602183219", inline=False)
+        embed.set_footer(text="18.08.2026 21:32")
+        await test_channel.send(embed=embed)
     elif message.content.strip() == "!reload":
         await message.channel.send("Przeładowuję bota...")
         await client.close()
