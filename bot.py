@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 
+import aiohttp
 import discord
 from dotenv import load_dotenv
 
@@ -163,7 +164,7 @@ async def run_bot() -> None:
     while True:
         try:
             await client.start(TOKEN, reconnect=True)
-        except (OSError, asyncio.TimeoutError) as error:
+        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as error:
             logging.warning("Utracono połączenie z internetem: %s", error)
             logging.info("Ponawiam uruchomienie bota za 10 sekund...")
             await asyncio.sleep(10)
