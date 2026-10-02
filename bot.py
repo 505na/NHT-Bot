@@ -153,6 +153,7 @@ async def on_member_join(member: discord.Member) -> None:
             color=discord.Color.from_rgb(15, 16, 19),
             timestamp=joined_at,
         )
+        embed.color = discord.Color.from_rgb(76, 175, 80)
         embed.set_author(name="Member Joined", icon_url="https://cdn.discordapp.com/emojis/1374002125509664829.png")
         embed.set_footer(text=f"{joined_at.strftime('%d.%m.%Y %H:%M')}")
         await log_channel.send(embed=embed)
