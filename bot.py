@@ -116,24 +116,32 @@ async def on_member_join(member: discord.Member) -> None:
         years, remaining_days = divmod(age_days, 365)
         months, days = divmod(remaining_days, 30)
 
-        age_parts = []
         if years:
-            age_parts.append(f"{years} year{'s' if years != 1 else ''}")
-        if months:
-            age_parts.append(f"{months} month{'s' if months != 1 else ''}")
-        if days or not age_parts:
-            age_parts.append(f"{days} day{'s' if days != 1 else ''}")
+            age_parts = [
+                f"{years} year{'s' if years != 1 else ''}",
+                f"{months} month{'s' if months != 1 else ''}",
+                f"{days} day{'s' if days != 1 else ''}",
+            ]
+        elif months:
+            age_parts = [
+                f"{months} month{'s' if months != 1 else ''}",
+                f"{days} day{'s' if days != 1 else ''}",
+            ]
+        else:
+            age_parts = [f"{days} day{'s' if days != 1 else ''}"]
 
+        age_text = ", ".join(age_parts)
         embed = discord.Embed(
-            title="Member Joined",
-            description=f"{member.mention}",
-            color=discord.Color.dark_theme(),
+            description=(
+                f"@{member.name} {member.display_name}\n\n"
+                f"**Account Age**\n"
+                f"{age_text}\n\n"
+                f"**ID:** {member.id}"
+            ),
+            color=discord.Color.from_rgb(15, 16, 19),
             timestamp=joined_at,
         )
-        embed.set_author(name="Dyna APL")
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Account Age", value=", ".join(age_parts), inline=False)
-        embed.add_field(name="ID", value=str(member.id), inline=False)
+        embed.set_author(name="Member Joined", icon_url="https://cdn.discordapp.com/emojis/1374002125509664829.png")
         embed.set_footer(text=f"{joined_at.strftime('%d.%m.%Y %H:%M')}")
         await log_channel.send(embed=embed)
 
