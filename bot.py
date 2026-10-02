@@ -28,7 +28,7 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
-client = discord.Client(intents=intents)
+client: discord.Client
 BOT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -57,13 +57,11 @@ def get_message_channel(guild: discord.Guild, channel_id: int) -> discord.TextCh
     return None
 
 
-@client.event
 async def on_ready() -> None:
     logging.info("Zalogowano jako %s", client.user)
     await client.change_presence(activity=discord.Game(name="by 505na"))
 
 
-@client.event
 async def on_message(message: discord.Message) -> None:
     if message.author.bot or not message.content.startswith("!"):
         return
@@ -109,7 +107,6 @@ async def on_message(message: discord.Message) -> None:
         reload_bot()
 
 
-@client.event
 async def on_member_join(member: discord.Member) -> None:
     log_channel = get_message_channel(member.guild, LOG_CHANNEL_ID)
     if log_channel is not None:
@@ -150,7 +147,6 @@ async def on_member_join(member: discord.Member) -> None:
     )
 
 
-@client.event
 async def on_member_remove(member: discord.Member) -> None:
     channel = get_message_channel(member.guild, GOODBYE_CHANNEL_ID)
     if channel is None:
@@ -160,17 +156,31 @@ async def on_member_remove(member: discord.Member) -> None:
     await channel.send(f"Żegnaj {member.mention} ({member.name}) nikt cię tu nie trzyma")
 
 
+def create_client() -> discord.Client:
+    new_client = discord.Client(intents=intents)
+    new_client.event(on_ready)
+    new_client.event(on_message)
+    new_client.event(on_member_join)
+    new_client.event(on_member_remove)
+    return new_client
+
+
 async def run_bot() -> None:
+    global client
+
     while True:
+        client = create_client()
         try:
             await client.start(TOKEN, reconnect=True)
         except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as error:
             logging.warning("Utracono połączenie z internetem: %s", error)
-            logging.info("Ponawiam uruchomienie bota za 10 sekund...")
-            await asyncio.sleep(10)
         else:
             logging.info("Połączenie bota zostało zamknięte. Ponawiam za 10 sekund...")
-            await asyncio.sleep(10)
+        finally:
+            await client.close()
+
+        logging.info("Ponawiam uruchomienie bota za 10 sekund...")
+        await asyncio.sleep(10)
 
 
 asyncio.run(run_bot())
