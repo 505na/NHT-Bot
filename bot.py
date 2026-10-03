@@ -189,19 +189,43 @@ def create_client() -> discord.Client:
 async def run_bot() -> None:
     global client
 
+    retry_delay = 10
+
     while True:
         client = create_client()
         try:
+            logging.info("Próba połączenia z Discordem...")
             await client.start(TOKEN, reconnect=True)
-        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as error:
-            logging.warning("Utracono połączenie z internetem: %s", error)
-        else:
-            logging.info("Połączenie bota zostało zamknięte. Ponawiam za 10 sekund...")
-        finally:
-            await client.close()
 
-        logging.info("Ponawiam uruchomienie bota za 10 sekund...")
-        await asyncio.sleep(10)
+            logging.info(
+                "Połączenie bota zostało zamknięte. Ponawiam za %s sekund...",
+                retry_delay,
+            )
+
+        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as error:
+            logging.warning(
+                "Brak połączenia z Discordem: %s. Kolejna próba za %s sekund...",
+                error,
+                retry_delay,
+            )
+
+        except asyncio.CancelledError:
+            logging.info("Zatrzymywanie bota...")
+            raise
+
+        except Exception:
+            logging.exception(
+                "Nieoczekiwany błąd połączenia. Kolejna próba za %s sekund...",
+                retry_delay,
+            )
+
+        finally:
+            try:
+                await client.close()
+            except Exception:
+                logging.debug("Błąd podczas zamykania klienta.", exc_info=True)
+
+        await asyncio.sleep(retry_delay)
 
 
 asyncio.run(run_bot())
