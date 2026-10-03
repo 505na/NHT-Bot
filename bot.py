@@ -233,6 +233,13 @@ async def run_bot() -> None:
                 retry_delay,
             )
 
+        except discord.LoginFailure:
+            logging.critical(
+                "Logowanie do Discorda nie powiodło się. Sprawdź, czy DISCORD_TOKEN "
+                "w pliku .env jest aktualnym tokenem bota."
+            )
+            raise
+
         except asyncio.CancelledError:
             logging.info("Zatrzymywanie bota...")
             raise
