@@ -186,15 +186,39 @@ def create_client() -> discord.Client:
     return new_client
 
 
+async def discord_available() -> bool:
+    """Sprawdza dostęp do API Discorda z krótkim timeoutem."""
+    timeout = aiohttp.ClientTimeout(total=5)
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get("https://discord.com/api/v10/gateway") as response:
+                return response.status == 200
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
+        logging.warning("Discord jest niedostępny: %s", error)
+        return False
+
+
 async def run_bot() -> None:
     global client
 
     retry_delay = 10
 
     while True:
+        # Nie pozwalamy discord.py wisieć ~60-70 sekund na DNS,
+        # gdy telefon nie ma Internetu.
+        if not await discord_available():
+            logging.warning(
+                "Brak dostępu do Discorda. Ponawiam sprawdzenie za %s sekund...",
+                retry_delay,
+            )
+            await asyncio.sleep(retry_delay)
+            continue
+
         client = create_client()
+
         try:
-            logging.info("Próba połączenia z Discordem...")
+            logging.info("Internet działa. Łączenie z Discordem...")
             await client.start(TOKEN, reconnect=True)
 
             logging.info(
@@ -204,7 +228,7 @@ async def run_bot() -> None:
 
         except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as error:
             logging.warning(
-                "Brak połączenia z Discordem: %s. Kolejna próba za %s sekund...",
+                "Błąd połączenia z Discordem: %s. Ponawiam za %s sekund...",
                 error,
                 retry_delay,
             )
@@ -215,7 +239,7 @@ async def run_bot() -> None:
 
         except Exception:
             logging.exception(
-                "Nieoczekiwany błąd połączenia. Kolejna próba za %s sekund...",
+                "Nieoczekiwany błąd. Ponawiam za %s sekund...",
                 retry_delay,
             )
 
