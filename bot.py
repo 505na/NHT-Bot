@@ -258,6 +258,40 @@ async def send_message_log_embed(
     await log_channel.send(embed=embed)
 
 
+async def send_deleted_message_log_embed(
+    guild: discord.Guild,
+    channel: discord.abc.GuildChannel | discord.Thread,
+    message_id: int,
+    *,
+    author: discord.abc.User | None = None,
+    attachments: list[discord.Attachment] | None = None,
+) -> None:
+    log_channel = get_message_channel(guild, MESSAGE_LOG_CHANNEL_ID)
+    if log_channel is None:
+        return
+
+    embed = discord.Embed(
+        title="Usunięto wiadomość",
+        color=discord.Color.from_rgb(255, 77, 87),
+        timestamp=discord.utils.utcnow(),
+    )
+    if author is None:
+        author_value = "Nieznany (wiadomość nie była w cache)"
+    else:
+        author_value = f"{author.mention} ({author.id})"
+    embed.add_field(name="Autor", value=author_value, inline=False)
+    embed.add_field(name="Kanał", value=channel.mention, inline=True)
+    embed.add_field(name="ID wiadomości", value=str(message_id), inline=True)
+    embed.add_field(name="Serwer", value=f"{guild.name} ({guild.id})", inline=False)
+
+    if attachments is None:
+        attachments_value = "Brak danych (wiadomość nie była w cache)"
+    else:
+        attachments_value = "\n".join(attachment.filename for attachment in attachments) or "Brak"
+    embed.add_field(name="Załączniki", value=attachments_value, inline=False)
+    await log_channel.send(embed=embed)
+
+
 async def on_message_edit(before: discord.Message, after: discord.Message) -> None:
     if before.author is None or before.author.bot:
         return
@@ -284,24 +318,30 @@ async def on_message_delete(message: discord.Message) -> None:
     if message.author is None or message.author.bot:
         return
 
-    description = (
-        f"Autor: {message.author.mention} ({message.author.id})\n"
-        f"Kanał: {message.channel.mention}\n"
-        f"Wiadomość: {message.id}\n\n"
-        f"{message.content[:2000] or '*(brak treści)*'}"
-    )
-    await send_message_log_embed(
+    await send_deleted_message_log_embed(
         message.guild,
-        "Usunięcie wiadomości",
-        description,
-        discord.Color.red(),
+        message.channel,
+        message.id,
         author=message.author,
-        channel=message.channel,
+        attachments=message.attachments,
     )
 
 
 async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent) -> None:
     if payload.guild_id is None:
+        return
+    cached_message = payload.cached_message
+    if cached_message is not None:
+        if cached_message.author is not None and not cached_message.author.bot:
+            return
+
+        await send_deleted_message_log_embed(
+            cached_message.guild,
+            cached_message.channel,
+            cached_message.id,
+            author=cached_message.author,
+            attachments=cached_message.attachments,
+        )
         return
 
     guild = client.get_guild(payload.guild_id)
@@ -312,12 +352,10 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent) -> None:
     if channel is None:
         return
 
-    await send_message_log_embed(
+    await send_deleted_message_log_embed(
         guild,
-        "Usunięcie wiadomości",
-        f"Wiadomość o ID {payload.message_id} została usunięta z kanału {channel.mention}.",
-        discord.Color.red(),
-        channel=channel,
+        channel,
+        payload.message_id,
     )
 
 
