@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 import sys
+from datetime import timedelta
 
 import aiohttp
 import discord
@@ -18,6 +19,7 @@ GOODBYE_CHANNEL_ID = int(os.getenv("GOODBYE_CHANNEL_ID", "0"))
 AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "0"))
 TEST_CHANNEL_ID = 1551275904280432683
 LOG_CHANNEL_ID = 1555304186231521341
+MESSAGE_LOG_CHANNEL_ID = 1560761928031272960
 
 if not TOKEN:
     raise RuntimeError("Brak DISCORD_TOKEN w pliku .env")
@@ -169,6 +171,63 @@ async def on_member_join(member: discord.Member) -> None:
 
 
 async def on_member_remove(member: discord.Member) -> None:
+    log_channel = get_message_channel(member.guild, LOG_CHANNEL_ID)
+    if log_channel is not None:
+        left_at = discord.utils.utcnow()
+        created_at = member.created_at
+        age_days = max(int((left_at - created_at).total_seconds() // 86400), 0)
+        years, remaining_days = divmod(age_days, 365)
+        months, days = divmod(remaining_days, 30)
+
+        if years:
+            age_parts = [
+                f"{years} year{'s' if years != 1 else ''}",
+                f"{months} month{'s' if months != 1 else ''}",
+                f"{days} day{'s' if days != 1 else ''}",
+            ]
+        elif months:
+            age_parts = [
+                f"{months} month{'s' if months != 1 else ''}",
+                f"{days} day{'s' if days != 1 else ''}",
+            ]
+        else:
+            age_parts = [f"{days} day{'s' if days != 1 else ''}"]
+
+        age_text = ", ".join(age_parts)
+        embed = discord.Embed(
+            description=(
+                f"@{member.name} {member.display_name}\n\n"
+                f"**Account Age**\n"
+                f"{age_text}\n\n"
+                f"**ID:** {member.id}"
+            ),
+            color=discord.Color.from_rgb(15, 16, 19),
+            timestamp=left_at,
+        )
+        embed.color = discord.Color.from_rgb(244, 67, 54)
+        embed.set_author(name="Member Left", icon_url="https://cdn.discordapp.com/emojis/1374002125509664829.png")
+        embed.set_footer(text=f"{left_at.strftime('%d.%m.%Y %H:%M')}")
+        await log_channel.send(embed=embed)
+
+    try:
+        cutoff = discord.utils.utcnow() - timedelta(minutes=5)
+        async for entry in member.guild.audit_logs(limit=20, action=discord.AuditLogAction.kick):
+            if entry.target and entry.target.id == member.id and entry.created_at >= cutoff:
+                await send_message_log_embed(
+                    member.guild,
+                    "Wyrzucenie użytkownika",
+                    (
+                        f"Użytkownik: {member.mention} ({member.id})\n"
+                        f"Moderator: {entry.user.mention if entry.user else 'nieznany'}\n"
+                        f"Powód: {entry.reason or 'brak'}"
+                    ),
+                    discord.Color.dark_orange(),
+                    author=member,
+                )
+                break
+    except Exception:
+        logging.debug("Nie można sprawdzić audit logów wyrzucenia użytkownika %s.", member.id, exc_info=True)
+
     channel = get_message_channel(member.guild, GOODBYE_CHANNEL_ID)
     if channel is None:
         logging.warning("Nie znaleziono kanału pożegnalnego na serwerze %s", member.guild.name)
@@ -177,12 +236,243 @@ async def on_member_remove(member: discord.Member) -> None:
     await channel.send(f"Żegnaj {member.mention} ({member.name}) nikt cię tu nie trzyma")
 
 
+async def send_message_log_embed(
+    guild: discord.Guild,
+    title: str,
+    description: str,
+    color: discord.Color,
+    *,
+    author: discord.abc.User | None = None,
+    channel: discord.abc.GuildChannel | discord.Thread | None = None,
+) -> None:
+    log_channel = get_message_channel(guild, MESSAGE_LOG_CHANNEL_ID)
+    if log_channel is None:
+        return
+
+    embed = discord.Embed(title=title, description=description, color=color, timestamp=discord.utils.utcnow())
+    if author is not None:
+        embed.set_author(name=f"{author} ({author.id})")
+    if channel is not None:
+        embed.add_field(name="Kanał", value=channel.mention, inline=False)
+
+    await log_channel.send(embed=embed)
+
+
+async def on_message_edit(before: discord.Message, after: discord.Message) -> None:
+    if before.author is None or before.author.bot:
+        return
+    if before.content == after.content:
+        return
+
+    description = (
+        f"Autor: {before.author.mention} ({before.author.id})\n"
+        f"Wiadomość: {before.id}\n\n"
+        f"**Przed:**\n{before.content[:1000] or '*(brak treści)*'}\n\n"
+        f"**Po:**\n{after.content[:1000] or '*(brak treści)*'}"
+    )
+    await send_message_log_embed(
+        after.guild,
+        "Edycja wiadomości",
+        description,
+        discord.Color.orange(),
+        author=before.author,
+        channel=after.channel,
+    )
+
+
+async def on_message_delete(message: discord.Message) -> None:
+    if message.author is None or message.author.bot:
+        return
+
+    description = (
+        f"Autor: {message.author.mention} ({message.author.id})\n"
+        f"Kanał: {message.channel.mention}\n"
+        f"Wiadomość: {message.id}\n\n"
+        f"{message.content[:2000] or '*(brak treści)*'}"
+    )
+    await send_message_log_embed(
+        message.guild,
+        "Usunięcie wiadomości",
+        description,
+        discord.Color.red(),
+        author=message.author,
+        channel=message.channel,
+    )
+
+
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent) -> None:
+    if payload.guild_id is None:
+        return
+
+    guild = client.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    channel = guild.get_channel(payload.channel_id)
+    if channel is None:
+        return
+
+    await send_message_log_embed(
+        guild,
+        "Usunięcie wiadomości",
+        f"Wiadomość o ID {payload.message_id} została usunięta z kanału {channel.mention}.",
+        discord.Color.red(),
+        channel=channel,
+    )
+
+
+async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent) -> None:
+    if payload.guild_id is None:
+        return
+
+    guild = client.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    channel = guild.get_channel(payload.channel_id)
+    if channel is None:
+        return
+
+    message_ids = ", ".join(str(message_id) for message_id in payload.message_ids[:20])
+    if len(payload.message_ids) > 20:
+        message_ids += ", ..."
+
+    await send_message_log_embed(
+        guild,
+        "Masowe usunięcie wiadomości",
+        (
+            f"Usunięto {len(payload.message_ids)} wiadomości z kanału {channel.mention}.\n"
+            f"ID: {message_ids}"
+        ),
+        discord.Color.dark_red(),
+        channel=channel,
+    )
+
+
+async def on_member_update(before: discord.Member, after: discord.Member) -> None:
+    if before.roles == after.roles:
+        return
+
+    added_roles = [role.name for role in after.roles if role not in before.roles]
+    removed_roles = [role.name for role in before.roles if role not in after.roles]
+
+    if not added_roles and not removed_roles:
+        return
+
+    description = f"Użytkownik: {after.mention} ({after.id})\n"
+    if added_roles:
+        description += f"\n**Nadane role:** {', '.join(added_roles) or 'brak'}"
+    if removed_roles:
+        description += f"\n**Usunięte role:** {', '.join(removed_roles) or 'brak'}"
+
+    await send_message_log_embed(
+        after.guild,
+        "Zmiana ról użytkownika",
+        description,
+        discord.Color.blurple(),
+        author=after,
+    )
+
+
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
+    if (
+        before.channel == after.channel
+        and before.mute == after.mute
+        and before.deaf == after.deaf
+        and before.self_mute == after.self_mute
+        and before.self_deaf == after.self_deaf
+        and before.suppress == after.suppress
+    ):
+        return
+
+    if before.channel is not None and after.channel is None:
+        cutoff = discord.utils.utcnow() - timedelta(minutes=5)
+        try:
+            async for entry in member.guild.audit_logs(
+                limit=20,
+                action=discord.AuditLogAction.member_disconnect,
+            ):
+                if entry.target and entry.target.id == member.id and entry.created_at >= cutoff:
+                    await send_message_log_embed(
+                        member.guild,
+                        "Wyrzucenie z kanału głosowego",
+                        (
+                            f"Użytkownik: {member.mention} ({member.id})\n"
+                            f"Moderator: {entry.user.mention if entry.user else 'nieznany'}\n"
+                            f"Powód: {entry.reason or 'brak'}"
+                        ),
+                        discord.Color.dark_orange(),
+                        author=member,
+                    )
+                    return
+        except Exception:
+            logging.debug(
+                "Nie można sprawdzić audit logów wyrzucenia z kanału głosowego użytkownika %s.",
+                member.id,
+                exc_info=True,
+            )
+
+    parts = [f"Użytkownik: {member.mention} ({member.id})"]
+
+    if before.channel != after.channel:
+        before_channel = before.channel.mention if before.channel is not None else "brak"
+        after_channel = after.channel.mention if after.channel is not None else "brak"
+        parts.append(f"Kanał: {before_channel} -> {after_channel}")
+
+    if before.mute != after.mute:
+        parts.append(f"Wyciszenie: {'tak' if after.mute else 'nie'}")
+    if before.deaf != after.deaf:
+        parts.append(f"Wyłączenie dźwięku: {'tak' if after.deaf else 'nie'}")
+    if before.self_mute != after.self_mute:
+        parts.append(f"Wyciszenie własne: {'tak' if after.self_mute else 'nie'}")
+    if before.self_deaf != after.self_deaf:
+        parts.append(f"Wyłączenie dźwięku własne: {'tak' if after.self_deaf else 'nie'}")
+    if before.suppress != after.suppress:
+        parts.append(f"Suppress: {'tak' if after.suppress else 'nie'}")
+
+    await send_message_log_embed(
+        member.guild,
+        "Zmiana stanu głosowego",
+        "\n".join(parts),
+        discord.Color.blue(),
+        author=member,
+    )
+
+
+async def on_member_ban(guild: discord.Guild, user: discord.User) -> None:
+    await send_message_log_embed(
+        guild,
+        "Zablokowanie użytkownika",
+        f"Użytkownik: {user.mention} ({user.id})\nStatus: zbanowany",
+        discord.Color.dark_red(),
+        author=user,
+    )
+
+
+async def on_member_unban(guild: discord.Guild, user: discord.User) -> None:
+    await send_message_log_embed(
+        guild,
+        "Odblokowanie użytkownika",
+        f"Użytkownik: {user.mention} ({user.id})\nStatus: odbanowany",
+        discord.Color.green(),
+        author=user,
+    )
+
+
 def create_client() -> discord.Client:
     new_client = discord.Client(intents=intents)
     new_client.event(on_ready)
     new_client.event(on_message)
     new_client.event(on_member_join)
     new_client.event(on_member_remove)
+    new_client.event(on_message_edit)
+    new_client.event(on_message_delete)
+    new_client.event(on_raw_message_delete)
+    new_client.event(on_raw_bulk_message_delete)
+    new_client.event(on_member_update)
+    new_client.event(on_voice_state_update)
+    new_client.event(on_member_ban)
+    new_client.event(on_member_unban)
     return new_client
 
 
