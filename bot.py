@@ -20,6 +20,7 @@ AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "0"))
 TEST_CHANNEL_ID = 1551275904280432683
 LOG_CHANNEL_ID = 1555304186231521341
 MESSAGE_LOG_CHANNEL_ID = 1560761928031272960
+WELCOME_TEMPLATE_USER_ID = 557628352828014614
 
 if not TOKEN:
     raise RuntimeError("Brak DISCORD_TOKEN w pliku .env")
@@ -65,7 +66,42 @@ async def on_ready() -> None:
 
 
 async def on_message(message: discord.Message) -> None:
-    if message.author.bot or not message.content.startswith("!"):
+    is_welcome_message = message.content.strip().casefold().endswith("welcome")
+    mentions_template_user = any(
+        user.id == WELCOME_TEMPLATE_USER_ID for user in message.mentions
+    )
+    if (
+        is_welcome_message
+        and (
+            message.author.id == WELCOME_TEMPLATE_USER_ID
+            or mentions_template_user
+        )
+    ):
+        await message.channel.send(
+            """Wypełnij wzór:
+
+᯾ Ile masz lat?
+᯾ Ocen swoje pvp 1-10
+᯾ Twoja ostatnia gildia i dlaczego w niej nie jesteś?
+᯾ Dlaczego akurat my?
+᯾ Umiesz robić water skille tak zwane wiadra?
+᯾ Potrafisz wychodzić z fosy slimeblockiem/zwykłym blokiem np coblem?
+᯾ Ile czasu poświęciłbyś dziennie na gildię?
+᯾ Skąd wiesz o rekrutacji?
+᯾ Posiadasz premkę?
+᯾ Jesteś toxic?
+᯾ Potrafisz uszanować młodsze/starsze osoby?
+᯾ Jaki masz nick w mc?
+᯾  opisz swoją osobowość
+᯾  czy potrafisz się zachować?
+᯾  czy potrafisz przegrywać? (wyjebiesz sie na edycji i grasz dalej a nie ryk bo ranking i itemy zrobiły papa)"""
+        )
+        return
+
+    if message.author.bot:
+        return
+
+    if not message.content.startswith("!"):
         return
 
     if message.author.id != AUTHORIZED_USER_ID:
@@ -256,7 +292,15 @@ async def send_deleted_message_log_embed(
 
     embed = discord.Embed(
         title="Usunięto wiadomość",
-        description=content[:4096] if content else "Brak treści w pamięci podręcznej Discorda.",
+        description=(
+            f"**Treść wiadomości:**\n{content[:4070]}"
+            if content
+            else (
+                "**Treść wiadomości:**\n*(wiadomość nie zawierała tekstu)*"
+                if content == ""
+                else "**Treść wiadomości:**\n*(niedostępna — wiadomości nie było w cache)*"
+            )
+        ),
         color=discord.Color.from_rgb(255, 82, 82),
         timestamp=discord.utils.utcnow(),
     )
