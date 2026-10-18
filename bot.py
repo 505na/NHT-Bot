@@ -21,6 +21,10 @@ TEST_CHANNEL_ID = 1551275904280432683
 LOG_CHANNEL_ID = 1555304186231521341
 MESSAGE_LOG_CHANNEL_ID = 1560761928031272960
 WELCOME_TEMPLATE_USER_ID = 557628352828014614
+PROBOT_USER_ID = 282859044593598464
+PROBOT_WELCOME_CHANNEL_ID = 846065271675420737
+PROBOT_GOODBYE_CHANNEL_ID = 899304602292346891
+PROBOT_ANNOUNCEMENT_TIMEOUT = 5
 
 if not TOKEN:
     raise RuntimeError("Brak DISCORD_TOKEN w pliku .env")
@@ -63,6 +67,22 @@ def get_message_channel(guild: discord.Guild, channel_id: int) -> discord.TextCh
 async def on_ready() -> None:
     logging.info("Zalogowano jako %s", client.user)
     await client.change_presence(activity=discord.Game(name="by 505na"))
+
+
+async def wait_for_probot_announcement(channel_id: int) -> bool:
+    try:
+        await client.wait_for(
+            "message",
+            timeout=PROBOT_ANNOUNCEMENT_TIMEOUT,
+            check=lambda message: (
+                message.author.id == PROBOT_USER_ID
+                and message.channel.id == channel_id
+            ),
+        )
+    except asyncio.TimeoutError:
+        return False
+
+    return True
 
 
 async def on_message(message: discord.Message) -> None:
@@ -158,6 +178,16 @@ async def on_message(message: discord.Message) -> None:
 
 
 async def on_member_join(member: discord.Member) -> None:
+    welcome_channel = get_message_channel(member.guild, WELCOME_CHANNEL_ID)
+    probot_announcement = None
+    if (
+        welcome_channel is not None
+        and welcome_channel.id == PROBOT_WELCOME_CHANNEL_ID
+    ):
+        probot_announcement = asyncio.create_task(
+            wait_for_probot_announcement(PROBOT_WELCOME_CHANNEL_ID)
+        )
+
     log_channel = get_message_channel(member.guild, LOG_CHANNEL_ID)
     if log_channel is not None:
         joined_at = member.joined_at or discord.utils.utcnow()
@@ -196,9 +226,15 @@ async def on_member_join(member: discord.Member) -> None:
         embed.set_footer(text=f"Dołączenie: {joined_at.strftime('%d.%m.%Y %H:%M:%S')}")
         await log_channel.send(embed=embed)
 
-    welcome_channel = get_message_channel(member.guild, WELCOME_CHANNEL_ID)
     if welcome_channel is None:
         logging.warning("Nie znaleziono kanału powitalnego na serwerze %s", member.guild.name)
+        return
+
+    if probot_announcement is not None and await probot_announcement:
+        logging.info(
+            "Pominięto powitanie dla użytkownika %s; ProBot opublikował wiadomość.",
+            member.id,
+        )
         return
 
     await welcome_channel.send(
@@ -207,6 +243,13 @@ async def on_member_join(member: discord.Member) -> None:
 
 
 async def on_member_remove(member: discord.Member) -> None:
+    channel = get_message_channel(member.guild, GOODBYE_CHANNEL_ID)
+    probot_announcement = None
+    if channel is not None and channel.id == PROBOT_GOODBYE_CHANNEL_ID:
+        probot_announcement = asyncio.create_task(
+            wait_for_probot_announcement(PROBOT_GOODBYE_CHANNEL_ID)
+        )
+
     log_channel = get_message_channel(member.guild, LOG_CHANNEL_ID)
     if log_channel is not None:
         left_at = discord.utils.utcnow()
@@ -242,9 +285,15 @@ async def on_member_remove(member: discord.Member) -> None:
     except Exception:
         logging.debug("Nie można sprawdzić audit logów wyrzucenia użytkownika %s.", member.id, exc_info=True)
 
-    channel = get_message_channel(member.guild, GOODBYE_CHANNEL_ID)
     if channel is None:
         logging.warning("Nie znaleziono kanału pożegnalnego na serwerze %s", member.guild.name)
+        return
+
+    if probot_announcement is not None and await probot_announcement:
+        logging.info(
+            "Pominięto pożegnanie dla użytkownika %s; ProBot opublikował wiadomość.",
+            member.id,
+        )
         return
 
     await channel.send(f"Żegnaj {member.mention} ({member.name}) nikt cię tu nie trzyma")
