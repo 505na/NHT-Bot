@@ -157,7 +157,7 @@ async def on_member_join(member: discord.Member) -> None:
         )
         embed.color = discord.Color.from_rgb(76, 175, 80)
         embed.set_author(name="Member Joined", icon_url="https://cdn.discordapp.com/emojis/1374002125509664829.png")
-        embed.set_footer(text=f"{joined_at.strftime('%d.%m.%Y %H:%M')}")
+        embed.set_footer(text=f"Dołączenie: {joined_at.strftime('%d.%m.%Y %H:%M:%S')}")
         await log_channel.send(embed=embed)
 
     welcome_channel = get_message_channel(member.guild, WELCOME_CHANNEL_ID)
@@ -174,39 +174,17 @@ async def on_member_remove(member: discord.Member) -> None:
     log_channel = get_message_channel(member.guild, LOG_CHANNEL_ID)
     if log_channel is not None:
         left_at = discord.utils.utcnow()
-        created_at = member.created_at
-        age_days = max(int((left_at - created_at).total_seconds() // 86400), 0)
-        years, remaining_days = divmod(age_days, 365)
-        months, days = divmod(remaining_days, 30)
-
-        if years:
-            age_parts = [
-                f"{years} year{'s' if years != 1 else ''}",
-                f"{months} month{'s' if months != 1 else ''}",
-                f"{days} day{'s' if days != 1 else ''}",
-            ]
-        elif months:
-            age_parts = [
-                f"{months} month{'s' if months != 1 else ''}",
-                f"{days} day{'s' if days != 1 else ''}",
-            ]
-        else:
-            age_parts = [f"{days} day{'s' if days != 1 else ''}"]
-
-        age_text = ", ".join(age_parts)
         embed = discord.Embed(
             description=(
                 f"@{member.name} {member.display_name}\n\n"
-                f"**Account Age**\n"
-                f"{age_text}\n\n"
                 f"**ID:** {member.id}"
             ),
             color=discord.Color.from_rgb(15, 16, 19),
             timestamp=left_at,
         )
-        embed.color = discord.Color.from_rgb(244, 67, 54)
+        embed.color = discord.Color.from_rgb(255, 82, 82)
         embed.set_author(name="Member Left", icon_url="https://cdn.discordapp.com/emojis/1374002125509664829.png")
-        embed.set_footer(text=f"{left_at.strftime('%d.%m.%Y %H:%M')}")
+        embed.set_footer(text=f"Wyjście: {left_at.strftime('%d.%m.%Y %H:%M:%S')}")
         await log_channel.send(embed=embed)
 
     try:
@@ -216,13 +194,13 @@ async def on_member_remove(member: discord.Member) -> None:
                 await send_message_log_embed(
                     member.guild,
                     "Wyrzucenie użytkownika",
-                    (
-                        f"Użytkownik: {member.mention} ({member.id})\n"
-                        f"Moderator: {entry.user.mention if entry.user else 'nieznany'}\n"
-                        f"Powód: {entry.reason or 'brak'}"
-                    ),
+                    "Użytkownik został wyrzucony z serwera.",
                     discord.Color.dark_orange(),
                     author=member,
+                    fields={
+                        "Moderator": entry.user.mention if entry.user else "Nieznany",
+                        "Powód": entry.reason or "Brak",
+                    },
                 )
                 break
     except Exception:
@@ -244,6 +222,7 @@ async def send_message_log_embed(
     *,
     author: discord.abc.User | None = None,
     channel: discord.abc.GuildChannel | discord.Thread | None = None,
+    fields: dict[str, str] | None = None,
 ) -> None:
     log_channel = get_message_channel(guild, MESSAGE_LOG_CHANNEL_ID)
     if log_channel is None:
@@ -251,9 +230,13 @@ async def send_message_log_embed(
 
     embed = discord.Embed(title=title, description=description, color=color, timestamp=discord.utils.utcnow())
     if author is not None:
-        embed.set_author(name=f"{author} ({author.id})")
+        embed.add_field(name="Autor", value=f"{author} (`{author.id}`)", inline=False)
     if channel is not None:
-        embed.add_field(name="Kanał", value=channel.mention, inline=False)
+        embed.add_field(name="Kanał", value=f"{channel.mention} (`{channel.id}`)", inline=True)
+    embed.add_field(name="Serwer", value=f"{guild.name} (`{guild.id}`)", inline=False)
+    if fields is not None:
+        for name, value in fields.items():
+            embed.add_field(name=name, value=value[:1024] or "Brak", inline=False)
 
     await log_channel.send(embed=embed)
 
@@ -265,6 +248,7 @@ async def send_deleted_message_log_embed(
     *,
     author: discord.abc.User | None = None,
     attachments: list[discord.Attachment] | None = None,
+    content: str | None = None,
 ) -> None:
     log_channel = get_message_channel(guild, MESSAGE_LOG_CHANNEL_ID)
     if log_channel is None:
@@ -272,22 +256,24 @@ async def send_deleted_message_log_embed(
 
     embed = discord.Embed(
         title="Usunięto wiadomość",
-        color=discord.Color.from_rgb(255, 77, 87),
+        description=content[:4096] if content else "Brak treści w pamięci podręcznej Discorda.",
+        color=discord.Color.from_rgb(255, 82, 82),
         timestamp=discord.utils.utcnow(),
     )
     if author is None:
         author_value = "Nieznany (wiadomość nie była w cache)"
     else:
-        author_value = f"{author.mention} ({author.id})"
+        author_value = f"{author} (`{author.id}`)"
     embed.add_field(name="Autor", value=author_value, inline=False)
-    embed.add_field(name="Kanał", value=channel.mention, inline=True)
+    embed.add_field(name="Kanał", value=f"{channel.mention} (`{channel.id}`)", inline=True)
     embed.add_field(name="ID wiadomości", value=str(message_id), inline=True)
-    embed.add_field(name="Serwer", value=f"{guild.name} ({guild.id})", inline=False)
+    embed.add_field(name="Serwer", value=f"{guild.name} (`{guild.id}`)", inline=False)
 
     if attachments is None:
         attachments_value = "Brak danych (wiadomość nie była w cache)"
     else:
         attachments_value = "\n".join(attachment.filename for attachment in attachments) or "Brak"
+        attachments_value = attachments_value[:1024]
     embed.add_field(name="Załączniki", value=attachments_value, inline=False)
     await log_channel.send(embed=embed)
 
@@ -298,20 +284,26 @@ async def on_message_edit(before: discord.Message, after: discord.Message) -> No
     if before.content == after.content:
         return
 
-    description = (
-        f"Autor: {before.author.mention} ({before.author.id})\n"
-        f"Wiadomość: {before.id}\n\n"
-        f"**Przed:**\n{before.content[:1000] or '*(brak treści)*'}\n\n"
-        f"**Po:**\n{after.content[:1000] or '*(brak treści)*'}"
+    guild = after.guild
+    embed = discord.Embed(
+        title="Edytowano wiadomość",
+        color=discord.Color.from_rgb(255, 193, 7),
+        timestamp=discord.utils.utcnow(),
     )
-    await send_message_log_embed(
-        after.guild,
-        "Edycja wiadomości",
-        description,
-        discord.Color.orange(),
-        author=before.author,
-        channel=after.channel,
+    embed.add_field(
+        name="Autor",
+        value=f"{after.author} (`{after.author.id}`)",
+        inline=False,
     )
+    embed.add_field(name="Kanał", value=after.channel.mention, inline=True)
+    embed.add_field(name="ID wiadomości", value=str(after.id), inline=True)
+    embed.add_field(name="Przed edycją", value=before.content[:1024] or "(brak treści)", inline=False)
+    embed.add_field(name="Po edycji", value=after.content[:1024] or "(brak treści)", inline=False)
+    if guild is not None:
+        embed.add_field(name="Serwer", value=f"{guild.name} (`{guild.id}`)", inline=False)
+        log_channel = get_message_channel(guild, MESSAGE_LOG_CHANNEL_ID)
+        if log_channel is not None:
+            await log_channel.send(embed=embed)
 
 
 async def on_message_delete(message: discord.Message) -> None:
@@ -324,6 +316,7 @@ async def on_message_delete(message: discord.Message) -> None:
         message.id,
         author=message.author,
         attachments=message.attachments,
+        content=message.content,
     )
 
 
@@ -341,6 +334,7 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent) -> None:
             cached_message.id,
             author=cached_message.author,
             attachments=cached_message.attachments,
+            content=cached_message.content,
         )
         return
 
@@ -378,12 +372,10 @@ async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent)
     await send_message_log_embed(
         guild,
         "Masowe usunięcie wiadomości",
-        (
-            f"Usunięto {len(payload.message_ids)} wiadomości z kanału {channel.mention}.\n"
-            f"ID: {message_ids}"
-        ),
+        f"Usunięto **{len(payload.message_ids)}** wiadomości.",
         discord.Color.dark_red(),
         channel=channel,
+        fields={"ID wiadomości": message_ids or "Brak"},
     )
 
 
@@ -397,18 +389,19 @@ async def on_member_update(before: discord.Member, after: discord.Member) -> Non
     if not added_roles and not removed_roles:
         return
 
-    description = f"Użytkownik: {after.mention} ({after.id})\n"
+    fields = {}
     if added_roles:
-        description += f"\n**Nadane role:** {', '.join(added_roles) or 'brak'}"
+        fields["Dodane role"] = ", ".join(added_roles)
     if removed_roles:
-        description += f"\n**Usunięte role:** {', '.join(removed_roles) or 'brak'}"
+        fields["Usunięte role"] = ", ".join(removed_roles)
 
     await send_message_log_embed(
         after.guild,
         "Zmiana ról użytkownika",
-        description,
+        "Zaktualizowano role użytkownika.",
         discord.Color.blurple(),
         author=after,
+        fields=fields,
     )
 
 
@@ -434,13 +427,13 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                     await send_message_log_embed(
                         member.guild,
                         "Wyrzucenie z kanału głosowego",
-                        (
-                            f"Użytkownik: {member.mention} ({member.id})\n"
-                            f"Moderator: {entry.user.mention if entry.user else 'nieznany'}\n"
-                            f"Powód: {entry.reason or 'brak'}"
-                        ),
+                        "Użytkownik został rozłączony z kanału głosowego przez moderatora.",
                         discord.Color.dark_orange(),
                         author=member,
+                        fields={
+                            "Moderator": entry.user.mention if entry.user else "Nieznany",
+                            "Powód": entry.reason or "Brak",
+                        },
                     )
                     return
         except Exception:
@@ -450,30 +443,31 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 exc_info=True,
             )
 
-    parts = [f"Użytkownik: {member.mention} ({member.id})"]
+    changes = {}
 
     if before.channel != after.channel:
         before_channel = before.channel.mention if before.channel is not None else "brak"
         after_channel = after.channel.mention if after.channel is not None else "brak"
-        parts.append(f"Kanał: {before_channel} -> {after_channel}")
+        changes["Zmiana kanału"] = f"{before_channel} → {after_channel}"
 
     if before.mute != after.mute:
-        parts.append(f"Wyciszenie: {'tak' if after.mute else 'nie'}")
+        changes["Wyciszenie serwerowe"] = "Włączone" if after.mute else "Wyłączone"
     if before.deaf != after.deaf:
-        parts.append(f"Wyłączenie dźwięku: {'tak' if after.deaf else 'nie'}")
+        changes["Głuchota serwerowa"] = "Włączona" if after.deaf else "Wyłączona"
     if before.self_mute != after.self_mute:
-        parts.append(f"Wyciszenie własne: {'tak' if after.self_mute else 'nie'}")
+        changes["Wyciszenie własne"] = "Włączone" if after.self_mute else "Wyłączone"
     if before.self_deaf != after.self_deaf:
-        parts.append(f"Wyłączenie dźwięku własne: {'tak' if after.self_deaf else 'nie'}")
+        changes["Głuchota własna"] = "Włączona" if after.self_deaf else "Wyłączona"
     if before.suppress != after.suppress:
-        parts.append(f"Suppress: {'tak' if after.suppress else 'nie'}")
+        changes["Wyciszenie przez kanał"] = "Włączone" if after.suppress else "Wyłączone"
 
     await send_message_log_embed(
         member.guild,
         "Zmiana stanu głosowego",
-        "\n".join(parts),
+        "Zmieniono stan użytkownika na kanale głosowym.",
         discord.Color.blue(),
         author=member,
+        fields=changes,
     )
 
 
@@ -481,7 +475,7 @@ async def on_member_ban(guild: discord.Guild, user: discord.User) -> None:
     await send_message_log_embed(
         guild,
         "Zablokowanie użytkownika",
-        f"Użytkownik: {user.mention} ({user.id})\nStatus: zbanowany",
+        "Użytkownik został zablokowany na serwerze.",
         discord.Color.dark_red(),
         author=user,
     )
@@ -491,7 +485,7 @@ async def on_member_unban(guild: discord.Guild, user: discord.User) -> None:
     await send_message_log_embed(
         guild,
         "Odblokowanie użytkownika",
-        f"Użytkownik: {user.mention} ({user.id})\nStatus: odbanowany",
+        "Blokada użytkownika została zdjęta.",
         discord.Color.green(),
         author=user,
     )
