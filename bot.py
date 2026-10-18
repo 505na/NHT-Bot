@@ -78,7 +78,7 @@ async def on_message(message: discord.Message) -> None:
         )
     ):
         await message.channel.send(
-            """Wypełnij wzór:
+            """Skopiuj i wypełnij wzór:
 
 ᯾ Ile masz lat?
 ᯾ Ocen swoje pvp 1-10
