@@ -27,6 +27,11 @@ TICKET_STAFF_ROLE_IDS = (
     846065271580000341,
     846065271580000342,
 )
+ACCEPTED_ROLE_IDS = (
+    898671794939125830,
+    846065271570825241,
+    898667104000155658,
+)
 
 QUESTIONS = (
     "Ile masz lat?",
@@ -560,6 +565,124 @@ class ConfirmCloseTicketView(discord.ui.View):
 class ClosedTicketView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Przyjęty",
+        style=discord.ButtonStyle.success,
+        custom_id="recruitment:closed:accepted",
+    )
+    async def accept_applicant(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel) or (
+            channel.id not in CLOSED_TICKETS
+        ):
+            await interaction.response.send_message(
+                "Ten ticket nie jest zamknięty.",
+                ephemeral=True,
+            )
+            return
+        if await reject_ticket_owner_interaction(interaction, channel):
+            return
+
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message(
+                "Nie udało się ustalić użytkownika serwera.",
+                ephemeral=True,
+            )
+            return
+        if not (
+            member.guild_permissions.administrator
+            or any(role.id in TICKET_STAFF_ROLE_IDS for role in member.roles)
+        ):
+            await interaction.response.send_message(
+                "Nie masz uprawnień do zatwierdzania kandydatów.",
+                ephemeral=True,
+            )
+            return
+
+        owner_id = get_ticket_owner_id(channel)
+        owner = channel.guild.get_member(owner_id) if owner_id is not None else None
+        if owner is None and owner_id is not None:
+            try:
+                owner = await channel.guild.fetch_member(owner_id)
+            except discord.NotFound:
+                await interaction.response.send_message(
+                    "Nie znaleziono autora ticketu na serwerze.",
+                    ephemeral=True,
+                )
+                return
+            except discord.HTTPException:
+                logging.exception(
+                    "Nie udało się pobrać autora ticketu %s.",
+                    channel.id,
+                )
+                await interaction.response.send_message(
+                    "Nie udało się pobrać autora ticketu. Spróbuj ponownie.",
+                    ephemeral=True,
+                )
+                return
+        if owner is None:
+            await interaction.response.send_message(
+                "Nie udało się ustalić autora ticketu.",
+                ephemeral=True,
+            )
+            return
+
+        roles = [channel.guild.get_role(role_id) for role_id in ACCEPTED_ROLE_IDS]
+        missing_roles = [
+            str(role_id)
+            for role_id, role in zip(ACCEPTED_ROLE_IDS, roles)
+            if role is None
+        ]
+        if missing_roles:
+            logging.error(
+                "Brak ról przyjęcia %s na serwerze %s.",
+                ", ".join(missing_roles),
+                channel.guild.id,
+            )
+            await interaction.response.send_message(
+                "Nie udało się znaleźć wszystkich wymaganych rang. "
+                "Powiadom administratora.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await owner.add_roles(
+                *(role for role in roles if role is not None),
+                reason=f"Kandydat przyjęty przez {member} ({member.id})",
+            )
+        except discord.Forbidden:
+            logging.exception(
+                "Bot nie może nadać ról przyjęcia użytkownikowi %s.",
+                owner.id,
+            )
+            await interaction.response.send_message(
+                "Bot nie ma uprawnień do nadania rang. Sprawdź uprawnienia "
+                "i hierarchię ról bota.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            logging.exception(
+                "Nie udało się nadać ról przyjęcia użytkownikowi %s.",
+                owner.id,
+            )
+            await interaction.response.send_message(
+                "Nie udało się nadać rang. Spróbuj ponownie później.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            f"{owner.mention} został przyjęty. Nadano wskazane role.",
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
 
     @discord.ui.button(
         label="Transcript",
