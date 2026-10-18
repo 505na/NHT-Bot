@@ -9,6 +9,8 @@ import aiohttp
 import discord
 from dotenv import load_dotenv
 
+import tickets
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -24,7 +26,7 @@ WELCOME_TEMPLATE_USER_ID = 557628352828014614
 PROBOT_USER_ID = 282859044593598464
 PROBOT_WELCOME_CHANNEL_ID = 846065271675420737
 PROBOT_GOODBYE_CHANNEL_ID = 899304602292346891
-PROBOT_ANNOUNCEMENT_TIMEOUT = 5
+PROBOT_ANNOUNCEMENT_TIMEOUT = 15
 
 if not TOKEN:
     raise RuntimeError("Brak DISCORD_TOKEN w pliku .env")
@@ -124,6 +126,27 @@ async def on_message(message: discord.Message) -> None:
     if not message.content.startswith("!"):
         return
 
+    if message.content.strip() == "!rekru":
+        if not isinstance(message.author, discord.Member) or not any(
+            role.id in tickets.RECRUITER_ROLE_IDS for role in message.author.roles
+        ):
+            await message.channel.send(
+                f"{message.author.mention}, nie masz uprawnień do używania tej komendy."
+            )
+            return
+
+        try:
+            await tickets.send_recruitment_panel(message.channel)
+        except discord.HTTPException:
+            logging.exception(
+                "Nie udało się wysłać panelu rekrutacyjnego na kanale %s.",
+                message.channel.id,
+            )
+            await message.channel.send(
+                "Nie udało się wysłać panelu rekrutacyjnego. Sprawdź uprawnienia bota."
+            )
+        return
+
     if message.author.id != AUTHORIZED_USER_ID:
         await message.channel.send(
             f"{message.author.mention}, nie masz uprawnień do używania tego bota."
@@ -179,14 +202,9 @@ async def on_message(message: discord.Message) -> None:
 
 async def on_member_join(member: discord.Member) -> None:
     welcome_channel = get_message_channel(member.guild, WELCOME_CHANNEL_ID)
-    probot_announcement = None
-    if (
-        welcome_channel is not None
-        and welcome_channel.id == PROBOT_WELCOME_CHANNEL_ID
-    ):
-        probot_announcement = asyncio.create_task(
-            wait_for_probot_announcement(PROBOT_WELCOME_CHANNEL_ID)
-        )
+    probot_announcement = asyncio.create_task(
+        wait_for_probot_announcement(PROBOT_WELCOME_CHANNEL_ID)
+    )
 
     log_channel = get_message_channel(member.guild, LOG_CHANNEL_ID)
     if log_channel is not None:
@@ -244,11 +262,9 @@ async def on_member_join(member: discord.Member) -> None:
 
 async def on_member_remove(member: discord.Member) -> None:
     channel = get_message_channel(member.guild, GOODBYE_CHANNEL_ID)
-    probot_announcement = None
-    if channel is not None and channel.id == PROBOT_GOODBYE_CHANNEL_ID:
-        probot_announcement = asyncio.create_task(
-            wait_for_probot_announcement(PROBOT_GOODBYE_CHANNEL_ID)
-        )
+    probot_announcement = asyncio.create_task(
+        wait_for_probot_announcement(PROBOT_GOODBYE_CHANNEL_ID)
+    )
 
     log_channel = get_message_channel(member.guild, LOG_CHANNEL_ID)
     if log_channel is not None:
@@ -586,6 +602,7 @@ async def on_member_unban(guild: discord.Guild, user: discord.User) -> None:
 
 def create_client() -> discord.Client:
     new_client = discord.Client(intents=intents)
+    tickets.register_ticket_views(new_client)
     new_client.event(on_ready)
     new_client.event(on_message)
     new_client.event(on_member_join)
