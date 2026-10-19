@@ -71,14 +71,43 @@ async def on_ready() -> None:
     await client.change_presence(activity=discord.Game(name="by 505na"))
 
 
-async def wait_for_probot_announcement(channel_id: int) -> bool:
+def message_mentions_member(message: discord.Message, member_id: int) -> bool:
+    mention_tokens = (f"<@{member_id}>", f"<@!{member_id}>")
+    message_text = [message.content]
+    for embed in message.embeds:
+        message_text.extend(
+            (
+                embed.title or "",
+                embed.description or "",
+            )
+        )
+        if embed.author is not None:
+            message_text.append(embed.author.name or "")
+        if embed.footer is not None:
+            message_text.append(embed.footer.text or "")
+        for field in embed.fields:
+            message_text.extend((field.name, field.value))
+
+    return any(token in text for token in mention_tokens for text in message_text)
+
+
+async def wait_for_probot_announcement(
+    channel_id: int,
+    guild_id: int,
+    member_id: int,
+) -> bool:
     try:
         await client.wait_for(
             "message",
             timeout=PROBOT_ANNOUNCEMENT_TIMEOUT,
             check=lambda message: (
                 message.author.id == PROBOT_USER_ID
-                and message.channel.id == channel_id
+                and message.guild is not None
+                and message.guild.id == guild_id
+                and (
+                    message.channel.id == channel_id
+                    or message_mentions_member(message, member_id)
+                )
             ),
         )
     except asyncio.TimeoutError:
@@ -203,8 +232,13 @@ async def on_message(message: discord.Message) -> None:
 async def on_member_join(member: discord.Member) -> None:
     welcome_channel = get_message_channel(member.guild, WELCOME_CHANNEL_ID)
     probot_announcement = asyncio.create_task(
-        wait_for_probot_announcement(PROBOT_WELCOME_CHANNEL_ID)
+        wait_for_probot_announcement(
+            PROBOT_WELCOME_CHANNEL_ID,
+            member.guild.id,
+            member.id,
+        )
     )
+    await asyncio.sleep(0)
 
     log_channel = get_message_channel(member.guild, LOG_CHANNEL_ID)
     if log_channel is not None:
@@ -263,8 +297,13 @@ async def on_member_join(member: discord.Member) -> None:
 async def on_member_remove(member: discord.Member) -> None:
     channel = get_message_channel(member.guild, GOODBYE_CHANNEL_ID)
     probot_announcement = asyncio.create_task(
-        wait_for_probot_announcement(PROBOT_GOODBYE_CHANNEL_ID)
+        wait_for_probot_announcement(
+            PROBOT_GOODBYE_CHANNEL_ID,
+            member.guild.id,
+            member.id,
+        )
     )
+    await asyncio.sleep(0)
 
     log_channel = get_message_channel(member.guild, LOG_CHANNEL_ID)
     if log_channel is not None:
