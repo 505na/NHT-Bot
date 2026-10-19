@@ -54,6 +54,7 @@ QUESTIONS = (
 
 OPEN_TICKET_CUSTOM_ID = "recruitment:open_ticket"
 CLOSE_TICKET_CUSTOM_ID = "recruitment:close_ticket"
+START_QUESTIONNAIRE_CUSTOM_ID = "recruitment:start_questionnaire"
 TICKET_OWNER_TOPIC_PREFIX = "ticket-owner:"
 MINECRAFT_NICKNAME_QUESTION = "Jaki masz nick w mc?"
 TICKET_TRANSCRIPT_CHANNEL_ID = 1561373677671686285
@@ -291,10 +292,10 @@ class OpenTicketView(discord.ui.View):
                     return
             else:
                 await interaction.followup.send(
-                    f"Wznawiam formularz w tickecie {existing_ticket.mention}.",
+                    f"Wznawiam formularz w tickecie {existing_ticket.mention}. "
+                    "Kliknij tam przycisk „Odpowiedz na pytania”, aby kontynuować prywatnie.",
                     ephemeral=True,
                 )
-                await send_private_question(interaction, existing_ticket.id)
             return
 
         bot_member = guild.me
@@ -417,15 +418,68 @@ class OpenTicketView(discord.ui.View):
             )
             return
         await interaction.followup.send(
-            f"Utworzono ticket: {ticket_channel.mention}",
+            f"Utworzono ticket: {ticket_channel.mention}. "
+            "Kliknij w nim przycisk „Odpowiedz na pytania”, aby rozpocząć prywatny formularz.",
             ephemeral=True,
         )
-        await send_private_question(interaction, ticket_channel.id)
 
 
 class CloseTicketView(discord.ui.View):
-    def __init__(self) -> None:
+    def __init__(self, *, include_questionnaire: bool = True) -> None:
         super().__init__(timeout=None)
+        if not include_questionnaire:
+            self.remove_item(
+                next(
+                    item
+                    for item in self.children
+                    if getattr(item, "custom_id", None)
+                    == START_QUESTIONNAIRE_CUSTOM_ID
+                )
+            )
+
+    @discord.ui.button(
+        label="Odpowiedz na pytania",
+        style=discord.ButtonStyle.primary,
+        custom_id=START_QUESTIONNAIRE_CUSTOM_ID,
+    )
+    async def start_questionnaire(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel) or not (
+            channel.topic or ""
+        ).startswith(TICKET_OWNER_TOPIC_PREFIX):
+            await interaction.response.send_message(
+                "Nie można otworzyć formularza w tym kanale.",
+                ephemeral=True,
+            )
+            return
+
+        if interaction.user.id != get_ticket_owner_id(channel):
+            await interaction.response.send_message(
+                "Tylko autor ticketu może odpowiadać na pytania.",
+                ephemeral=True,
+            )
+            return
+
+        questionnaire = ACTIVE_QUESTIONNAIRES.get(channel.id)
+        if questionnaire is None:
+            await interaction.response.send_message(
+                "Formularz został już zakończony albo nie jest dostępny.",
+                ephemeral=True,
+            )
+            return
+        if channel.id in CLOSED_TICKETS:
+            await interaction.response.send_message(
+                "Ticket jest zamknięty; nie możesz dalej korzystać z formularza.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await send_private_question(interaction, channel.id)
 
     @discord.ui.button(
         label="Zamknij ticket",
@@ -1071,11 +1125,44 @@ async def send_private_question(
         question_index,
     )
     interaction.client.add_view(view)
-    await interaction.followup.send(
-        embed=embed,
-        view=view,
-        ephemeral=True,
-    )
+    channel = interaction.client.get_channel(channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        try:
+            channel = await interaction.client.fetch_channel(channel_id)
+        except discord.HTTPException:
+            logging.exception(
+                "Nie udało się pobrać kanału ticketu %s, aby wysłać pytanie.",
+                channel_id,
+            )
+            await interaction.followup.send(
+                "Nie udało się wysłać pytania w tickecie. Spróbuj ponownie później.",
+                ephemeral=True,
+            )
+            return
+
+    if not isinstance(channel, discord.TextChannel):
+        logging.error(
+            "Kanał %s nie jest kanałem tekstowym; nie można wysłać pytania ticketu.",
+            channel_id,
+        )
+        await interaction.followup.send(
+            "Nie udało się wysłać pytania w tickecie. Spróbuj ponownie później.",
+            ephemeral=True,
+        )
+        return
+
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            embed=embed,
+            view=view,
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            embed=embed,
+            view=view,
+            ephemeral=True,
+        )
 
 
 async def ticket_channel_exists(
@@ -1435,7 +1522,11 @@ async def send_answer_embeds(
         embed.set_footer(text=f"Strona {page_number}/{len(pages)}")
         await channel.send(
             embed=embed,
-            view=CloseTicketView() if page_number == 1 else None,
+            view=(
+                CloseTicketView(include_questionnaire=False)
+                if page_number == 1
+                else None
+            ),
         )
 
 
