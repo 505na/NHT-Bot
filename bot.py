@@ -553,6 +553,53 @@ async def on_member_update(before: discord.Member, after: discord.Member) -> Non
     )
 
 
+async def find_voice_audit_log_entry(
+    member: discord.Member,
+    action: discord.AuditLogAction,
+    *,
+    expected_channel: discord.abc.GuildChannel | None = None,
+    expected_changes: dict[str, tuple[bool, bool]] | None = None,
+) -> discord.AuditLogEntry | None:
+    cutoff = discord.utils.utcnow() - timedelta(seconds=30)
+    try:
+        async for entry in member.guild.audit_logs(limit=20, action=action):
+            if entry.created_at < cutoff:
+                break
+            if entry.target is None or entry.target.id != member.id:
+                continue
+
+            if expected_channel is not None:
+                audit_channel = getattr(entry.extra, "channel", None)
+                if audit_channel is not None and audit_channel.id != expected_channel.id:
+                    continue
+
+            if expected_changes is not None:
+                before_changes = entry.changes.before
+                after_changes = entry.changes.after
+                if not any(
+                    hasattr(before_changes, name)
+                    and hasattr(after_changes, name)
+                    and getattr(before_changes, name) == old_value
+                    and getattr(after_changes, name) == new_value
+                    for name, (old_value, new_value) in expected_changes.items()
+                ):
+                    continue
+
+            return entry
+    except discord.Forbidden:
+        logging.warning(
+            "Brak uprawnień do odczytu dziennika audytu zmian głosowych użytkownika %s.",
+            member.id,
+        )
+    except discord.HTTPException:
+        logging.exception(
+            "Nie udało się odczytać dziennika audytu zmian głosowych użytkownika %s.",
+            member.id,
+        )
+
+    return None
+
+
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
     if (
         before.channel == after.channel
@@ -564,39 +611,54 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     ):
         return
 
-    if before.channel is not None and after.channel is None:
-        cutoff = discord.utils.utcnow() - timedelta(minutes=5)
-        try:
-            async for entry in member.guild.audit_logs(
-                limit=20,
-                action=discord.AuditLogAction.member_disconnect,
-            ):
-                if entry.target and entry.target.id == member.id and entry.created_at >= cutoff:
-                    await send_message_log_embed(
-                        member.guild,
-                        "Wyrzucenie z kanału głosowego",
-                        "Użytkownik został rozłączony z kanału głosowego przez moderatora.",
-                        discord.Color.dark_orange(),
-                        author=member,
-                        fields={
-                            "Moderator": entry.user.mention if entry.user else "Nieznany",
-                            "Powód": entry.reason or "Brak",
-                        },
-                    )
-                    return
-        except Exception:
-            logging.debug(
-                "Nie można sprawdzić audit logów wyrzucenia z kanału głosowego użytkownika %s.",
-                member.id,
-                exc_info=True,
-            )
-
-    changes = {}
+    changes: dict[str, str] = {
+        "Użytkownik": f"{member.mention} (`{member.id}`)",
+    }
+    title = "Zmiana stanu głosowego"
+    description = "Zmieniono stan użytkownika na kanale głosowym."
+    color = discord.Color.blue()
 
     if before.channel != after.channel:
         before_channel = before.channel.mention if before.channel is not None else "brak"
         after_channel = after.channel.mention if after.channel is not None else "brak"
         changes["Zmiana kanału"] = f"{before_channel} → {after_channel}"
+
+        audit_entry = None
+        if before.channel is not None and after.channel is None:
+            audit_entry = await find_voice_audit_log_entry(
+                member,
+                discord.AuditLogAction.member_disconnect,
+            )
+            if audit_entry is not None:
+                title = "Wyrzucenie z kanału głosowego"
+                description = f"{member.mention} został rozłączony z kanału głosowego."
+            else:
+                title = "Rozłączenie z kanału głosowego"
+                description = f"{member.mention} opuścił lub został rozłączony z kanału głosowego."
+        elif after.channel is not None and before.channel is not None:
+            audit_entry = await find_voice_audit_log_entry(
+                member,
+                discord.AuditLogAction.member_move,
+                expected_channel=after.channel,
+            )
+            title = "Przeniesienie na kanale głosowym"
+            description = f"{member.mention} zmienił kanał głosowy."
+        elif after.channel is not None:
+            title = "Dołączenie do kanału głosowego"
+            description = f"{member.mention} dołączył do kanału głosowego."
+
+        if audit_entry is not None and audit_entry.user is not None:
+            changes["Wykonał zmianę kanału"] = (
+                f"{audit_entry.user.mention} (`{audit_entry.user.id}`)"
+            )
+            if audit_entry.reason:
+                changes["Powód"] = audit_entry.reason
+        elif before.channel is None and after.channel is not None:
+            changes["Wykonał zmianę kanału"] = f"{member.mention} (`{member.id}`)"
+        else:
+            changes["Wykonał zmianę kanału"] = "Nieznany (brak wpisu w dzienniku audytu)"
+
+        color = discord.Color.dark_orange()
 
     if before.mute != after.mute:
         changes["Wyciszenie serwerowe"] = "Włączone" if after.mute else "Wyłączone"
@@ -608,13 +670,40 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         changes["Głuchota własna"] = "Włączona" if after.self_deaf else "Wyłączona"
     if before.suppress != after.suppress:
         changes["Wyciszenie przez kanał"] = "Włączone" if after.suppress else "Wyłączone"
+        changes["Wykonał zmianę wyciszenia przez kanał"] = (
+            "Nieznany (brak wpisu w dzienniku audytu)"
+        )
+
+    expected_moderated_changes: dict[str, tuple[bool, bool]] = {}
+    if before.mute != after.mute:
+        expected_moderated_changes["mute"] = (before.mute, after.mute)
+    if before.deaf != after.deaf:
+        expected_moderated_changes["deaf"] = (before.deaf, after.deaf)
+    if expected_moderated_changes:
+        audit_entry = await find_voice_audit_log_entry(
+            member,
+            discord.AuditLogAction.member_update,
+            expected_changes=expected_moderated_changes,
+        )
+        if audit_entry is not None and audit_entry.user is not None:
+            changes["Wykonał zmianę wyciszenia/głuchoty"] = (
+                f"{audit_entry.user.mention} (`{audit_entry.user.id}`)"
+            )
+            if audit_entry.reason:
+                changes["Powód zmiany wyciszenia/głuchoty"] = audit_entry.reason
+        else:
+            changes["Wykonał zmianę wyciszenia/głuchoty"] = (
+                "Nieznany (brak wpisu w dzienniku audytu)"
+            )
+
+    if before.self_mute != after.self_mute or before.self_deaf != after.self_deaf:
+        changes["Wykonał zmianę własnego stanu"] = f"{member.mention} (`{member.id}`)"
 
     await send_message_log_embed(
         member.guild,
-        "Zmiana stanu głosowego",
-        "Zmieniono stan użytkownika na kanale głosowym.",
-        discord.Color.blue(),
-        author=member,
+        title,
+        description,
+        color,
         fields=changes,
     )
 
