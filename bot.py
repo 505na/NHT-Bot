@@ -39,6 +39,8 @@ intents.message_content = True
 
 client: discord.Client
 BOT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+recent_voice_audit_entries: list[discord.AuditLogEntry] = []
+used_voice_move_audit_entry_ids: dict[int, int] = {}
 
 
 def reload_bot() -> None:
@@ -559,33 +561,121 @@ async def find_voice_audit_log_entry(
     *,
     expected_channel: discord.abc.GuildChannel | None = None,
     expected_changes: dict[str, tuple[bool, bool]] | None = None,
+    allow_missing_target: bool = False,
 ) -> discord.AuditLogEntry | None:
-    cutoff = discord.utils.utcnow() - timedelta(seconds=30)
-    try:
-        async for entry in member.guild.audit_logs(limit=20, action=action):
-            if entry.created_at < cutoff:
-                break
-            if entry.target is None or entry.target.id != member.id:
-                continue
+    async def matches(entry: discord.AuditLogEntry) -> bool:
+        max_age = 5 if allow_missing_target else 30
+        if entry.created_at < discord.utils.utcnow() - timedelta(seconds=max_age):
+            return False
+        if entry.target is None:
+            if not allow_missing_target:
+                return False
+        elif entry.target.id != member.id:
+            return False
 
-            if expected_channel is not None:
-                audit_channel = getattr(entry.extra, "channel", None)
-                if audit_channel is not None and audit_channel.id != expected_channel.id:
-                    continue
+        if expected_channel is not None:
+            audit_channel = getattr(entry.extra, "channel", None)
+            if audit_channel is None or audit_channel.id != expected_channel.id:
+                return False
 
-            if expected_changes is not None:
-                before_changes = entry.changes.before
-                after_changes = entry.changes.after
-                if not any(
-                    hasattr(before_changes, name)
-                    and hasattr(after_changes, name)
-                    and getattr(before_changes, name) == old_value
-                    and getattr(after_changes, name) == new_value
-                    for name, (old_value, new_value) in expected_changes.items()
-                ):
-                    continue
+        if expected_changes is not None:
+            before_changes = entry.changes.before
+            after_changes = entry.changes.after
+            if not any(
+                hasattr(before_changes, name)
+                and hasattr(after_changes, name)
+                and getattr(before_changes, name) == old_value
+                and getattr(after_changes, name) == new_value
+                for name, (old_value, new_value) in expected_changes.items()
+            ):
+                return False
 
+        return True
+
+    if (
+        action == discord.AuditLogAction.member_move
+        and allow_missing_target
+        and expected_channel is not None
+    ):
+        try:
+            for attempt in range(8):
+                candidates = {
+                    entry.id: entry
+                    for entry in recent_voice_audit_entries
+                    if used_voice_move_audit_entry_ids.get(entry.id, 0)
+                    < max(1, getattr(entry.extra, "count", 1))
+                    and entry.action == action
+                    and entry.guild.id == member.guild.id
+                    and await matches(entry)
+                }
+
+                if attempt % 3 == 0:
+                    async for entry in member.guild.audit_logs(limit=20, action=action):
+                        if entry.created_at < discord.utils.utcnow() - timedelta(seconds=5):
+                            break
+                        if (
+                            used_voice_move_audit_entry_ids.get(entry.id, 0)
+                            < max(1, getattr(entry.extra, "count", 1))
+                            and await matches(entry)
+                        ):
+                            candidates[entry.id] = entry
+
+                if len(candidates) == 1 and attempt >= 1:
+                    entry = next(iter(candidates.values()))
+                    used_voice_move_audit_entry_ids[entry.id] = (
+                        used_voice_move_audit_entry_ids.get(entry.id, 0) + 1
+                    )
+                    if len(used_voice_move_audit_entry_ids) > 500:
+                        oldest_entry_id = min(used_voice_move_audit_entry_ids)
+                        del used_voice_move_audit_entry_ids[oldest_entry_id]
+                    if entry in recent_voice_audit_entries:
+                        recent_voice_audit_entries.remove(entry)
+                    return entry
+
+                if attempt < 7:
+                    await asyncio.sleep(0.75)
+        except discord.Forbidden:
+            logging.warning(
+                "Brak uprawnień do odczytu dziennika audytu zmian głosowych użytkownika %s.",
+                member.id,
+            )
+        except discord.HTTPException:
+            logging.exception(
+                "Nie udało się odczytać dziennika audytu zmian głosowych użytkownika %s.",
+                member.id,
+            )
+        return None
+
+    for entry in reversed(recent_voice_audit_entries):
+        if (
+            entry.action == action
+            and entry.guild.id == member.guild.id
+            and await matches(entry)
+        ):
+            recent_voice_audit_entries.remove(entry)
             return entry
+
+    try:
+        for attempt in range(8 if allow_missing_target else 1):
+            for entry in reversed(recent_voice_audit_entries):
+                if (
+                    entry.action == action
+                    and entry.guild.id == member.guild.id
+                    and await matches(entry)
+                ):
+                    recent_voice_audit_entries.remove(entry)
+                    return entry
+
+            if attempt % 3 == 0:
+                cutoff = discord.utils.utcnow() - timedelta(seconds=30)
+                async for entry in member.guild.audit_logs(limit=20, action=action):
+                    if entry.created_at < cutoff:
+                        break
+                    if await matches(entry):
+                        return entry
+
+            if allow_missing_target and attempt < 7:
+                await asyncio.sleep(0.75)
     except discord.Forbidden:
         logging.warning(
             "Brak uprawnień do odczytu dziennika audytu zmian głosowych użytkownika %s.",
@@ -598,6 +688,49 @@ async def find_voice_audit_log_entry(
         )
 
     return None
+
+
+async def on_audit_log_entry_create(entry: discord.AuditLogEntry) -> None:
+    if entry.action not in (
+        discord.AuditLogAction.member_move,
+        discord.AuditLogAction.member_disconnect,
+        discord.AuditLogAction.member_update,
+    ):
+        return
+
+    recent_voice_audit_entries.append(entry)
+    del recent_voice_audit_entries[:-50]
+
+
+async def send_voice_channel_log(
+    member: discord.Member,
+    actor: discord.abc.User | None,
+    description: str,
+    *,
+    color: discord.Color,
+) -> None:
+    log_channel = get_message_channel(member.guild, MESSAGE_LOG_CHANNEL_ID)
+    if log_channel is None:
+        logging.warning(
+            "Nie znaleziono kanału logów dla zmiany kanału głosowego użytkownika %s.",
+            member.id,
+        )
+        return
+
+    embed = discord.Embed(
+        description=description,
+        color=color,
+        timestamp=discord.utils.utcnow(),
+    )
+    if actor is None:
+        embed.set_author(name="Unknown")
+    else:
+        embed.set_author(
+            name=actor.display_name,
+            icon_url=actor.display_avatar.url,
+        )
+    embed.set_footer(text=f"ID: {member.id}")
+    await log_channel.send(embed=embed)
 
 
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
@@ -619,46 +752,62 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     color = discord.Color.blue()
 
     if before.channel != after.channel:
-        before_channel = before.channel.mention if before.channel is not None else "brak"
-        after_channel = after.channel.mention if after.channel is not None else "brak"
-        changes["Zmiana kanału"] = f"{before_channel} → {after_channel}"
-
-        audit_entry = None
         if before.channel is not None and after.channel is None:
             audit_entry = await find_voice_audit_log_entry(
                 member,
                 discord.AuditLogAction.member_disconnect,
             )
             if audit_entry is not None:
-                title = "Wyrzucenie z kanału głosowego"
-                description = f"{member.mention} został rozłączony z kanału głosowego."
+                actor = audit_entry.user
+                description = (
+                    f"{actor.mention} disconnected {member.mention} from voice channel "
+                    f"{before.channel.mention}"
+                    if actor is not None
+                    else f"{member.mention} left voice channel {before.channel.mention}"
+                )
             else:
-                title = "Rozłączenie z kanału głosowego"
-                description = f"{member.mention} opuścił lub został rozłączony z kanału głosowego."
+                actor = member
+                description = f"{member.mention} left voice channel {before.channel.mention}"
+            await send_voice_channel_log(
+                member,
+                actor,
+                description,
+                color=discord.Color.from_rgb(149, 165, 166),
+            )
+            return
         elif after.channel is not None and before.channel is not None:
             audit_entry = await find_voice_audit_log_entry(
                 member,
                 discord.AuditLogAction.member_move,
                 expected_channel=after.channel,
+                allow_missing_target=True,
             )
-            title = "Przeniesienie na kanale głosowym"
-            description = f"{member.mention} zmienił kanał głosowy."
+            actor = (
+                audit_entry.user
+                if audit_entry is not None
+                and audit_entry.user is not None
+                and audit_entry.user.id != member.id
+                else None
+            )
+            await send_voice_channel_log(
+                member,
+                actor,
+                (
+                    f"{actor.mention if actor is not None else 'Unknown'} moved "
+                    f"{member.mention} from {before.channel.mention} to "
+                    f"{after.channel.mention}"
+                ),
+                color=discord.Color.from_rgb(46, 204, 113),
+            )
+            return
         elif after.channel is not None:
-            title = "Dołączenie do kanału głosowego"
-            description = f"{member.mention} dołączył do kanału głosowego."
-
-        if audit_entry is not None and audit_entry.user is not None:
-            changes["Wykonał zmianę kanału"] = (
-                f"{audit_entry.user.mention} (`{audit_entry.user.id}`)"
+            await send_voice_channel_log(
+                member,
+                member,
+                f"{member.mention} joined voice channel {after.channel.mention}",
+                color=discord.Color.from_rgb(46, 204, 113),
             )
-            if audit_entry.reason:
-                changes["Powód"] = audit_entry.reason
-        elif before.channel is None and after.channel is not None:
-            changes["Wykonał zmianę kanału"] = f"{member.mention} (`{member.id}`)"
-        else:
-            changes["Wykonał zmianę kanału"] = "Nieznany (brak wpisu w dzienniku audytu)"
-
-        color = discord.Color.dark_orange()
+            return
 
     if before.mute != after.mute:
         changes["Wyciszenie serwerowe"] = "Włączone" if after.mute else "Wyłączone"
@@ -741,6 +890,7 @@ def create_client() -> discord.Client:
     new_client.event(on_raw_bulk_message_delete)
     new_client.event(on_member_update)
     new_client.event(on_voice_state_update)
+    new_client.event(on_audit_log_entry_create)
     new_client.event(on_member_ban)
     new_client.event(on_member_unban)
     return new_client
