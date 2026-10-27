@@ -8,3 +8,4 @@ ticket_counter.txt
 ticket_counter.tmp
 ticket_status.json
 ticket_status.tmp
+channel_backup_state.jsonl

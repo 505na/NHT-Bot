@@ -9,6 +9,7 @@ import aiohttp
 import discord
 from dotenv import load_dotenv
 
+import channel_backup
 import tickets
 
 load_dotenv()
@@ -71,6 +72,7 @@ def get_message_channel(guild: discord.Guild, channel_id: int) -> discord.TextCh
 async def on_ready() -> None:
     logging.info("Zalogowano jako %s", client.user)
     await client.change_presence(activity=discord.Game(name="by 505na"))
+    channel_backup.start_scheduled_backup(client)
 
 
 def message_mentions_member(message: discord.Message, member_id: int) -> bool:
@@ -155,6 +157,13 @@ async def on_message(message: discord.Message) -> None:
         return
 
     if not message.content.startswith("!"):
+        return
+
+    if await channel_backup.handle_command(
+        client,
+        message,
+        AUTHORIZED_USER_ID,
+    ):
         return
 
     if message.content.strip() == "!rekru":
@@ -473,6 +482,13 @@ async def on_message_delete(message: discord.Message) -> None:
 async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent) -> None:
     if payload.guild_id is None:
         return
+    await channel_backup.restore_deleted_backup(
+        client,
+        payload.guild_id,
+        payload.channel_id,
+        (payload.message_id,),
+    )
+
     cached_message = payload.cached_message
     if cached_message is not None:
         if cached_message.author is not None and not cached_message.author.bot:
@@ -506,6 +522,13 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent) -> None:
 async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent) -> None:
     if payload.guild_id is None:
         return
+
+    await channel_backup.restore_deleted_backup(
+        client,
+        payload.guild_id,
+        payload.channel_id,
+        payload.message_ids,
+    )
 
     guild = client.get_guild(payload.guild_id)
     if guild is None:
@@ -961,6 +984,7 @@ async def run_bot() -> None:
             )
 
         finally:
+            channel_backup.stop_scheduled_backup()
             try:
                 await client.close()
             except Exception:
