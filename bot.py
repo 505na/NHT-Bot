@@ -139,6 +139,7 @@ async def on_message(message: discord.Message) -> None:
 ᯾ Ocen swoje pvp 1-10
 ᯾ Twoja ostatnia gildia i dlaczego w niej nie jesteś?
 ᯾ Dlaczego akurat my?
+᯾ Przyszedłeś do nas na konkretny serwer czy na wszystkie?
 ᯾ Umiesz robić water skille tak zwane wiadra?
 ᯾ Potrafisz wychodzić z fosy slimeblockiem/zwykłym blokiem np coblem?
 ᯾ Ile czasu poświęciłbyś dziennie na gildię?
