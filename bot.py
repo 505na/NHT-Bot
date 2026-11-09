@@ -255,8 +255,21 @@ async def on_message(message: discord.Message) -> None:
         elif result.returncode != 0:
             logging.error("systemctl %s nie powiódł się: %s", action, output)
             safe_output = output.replace("```", "'''")[:1200]
+            lower_output = output.casefold()
+            authorization_hint = ""
+            if (
+                "interactive authentication" in lower_output
+                or "a password is required" in lower_output
+                or "not allowed to execute" in lower_output
+            ):
+                authorization_hint = (
+                    "\nBrak bezhasłowego uprawnienia sudo dla użytkownika usługi. "
+                    "Sprawdź `User=` w pliku usługi i regułę sudoers w "
+                    "`SYSTEMD.md`."
+                )
             await message.channel.send(
                 f"Polecenie `systemctl {action}` nie powiodło się."
+                + authorization_hint
                 + (f"\n```text\n{safe_output}\n```" if safe_output else ""),
                 allowed_mentions=discord.AllowedMentions.none(),
             )

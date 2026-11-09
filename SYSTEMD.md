@@ -64,7 +64,8 @@ teraz usługa.
 
 Komendy Discord wymagają `sudo` bez pytania o hasło. Utwórz plik przez
 `sudo visudo -f /etc/sudoers.d/nht-bot-systemctl`, zastępując `nht-bot`
-użytkownikiem uruchamiającym usługę:
+użytkownikiem ustawionym w `User=` w `/etc/systemd/system/nht-bot.service`
+(domyślnie `nht-bot`):
 
 ```sudoers
 nht-bot ALL=(root) NOPASSWD: /usr/bin/systemctl status nht-bot.service --no-pager, /usr/bin/systemctl --no-block start nht-bot.service, /usr/bin/systemctl --no-block stop nht-bot.service, /usr/bin/systemctl --no-block restart nht-bot.service
@@ -73,3 +74,17 @@ nht-bot ALL=(root) NOPASSWD: /usr/bin/systemctl status nht-bot.service --no-page
 Zakres uprawnień sudo jest ograniczony do tych czterech operacji na tej jednej
 usłudze. `--no-block` pozwala komendom `stop` i `restart` wrócić bez oczekiwania
 na zakończenie procesu bota.
+
+Jeśli Discord pokazuje `sudo: interactive authentication is required`, bot
+nie ma dopasowanej reguły `NOPASSWD`. Zapisz regułę z właściwym użytkownikiem,
+sprawdź jej składnię i przetestuj bezpieczną komendę statusu:
+
+```sh
+sudo chmod 0440 /etc/sudoers.d/nht-bot-systemctl
+sudo visudo -cf /etc/sudoers.d/nht-bot-systemctl
+sudo -u nht-bot sudo -n /usr/bin/systemctl status nht-bot.service --no-pager
+```
+
+W ostatniej komendzie użyj użytkownika z `User=` w usłudze. Jeśli test nadal
+nie przechodzi, sprawdź, czy plik sudoers zawiera tę samą nazwę użytkownika
+i dokładne polecenia z bloku powyżej.
