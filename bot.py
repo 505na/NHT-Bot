@@ -174,6 +174,19 @@ async def on_message(message: discord.Message) -> None:
     if not message.content.startswith("!"):
         return
 
+    if message.content.strip().casefold() == "!help":
+        await message.channel.send(
+            "**Dostępne komendy:**\n"
+            "`!rekru` — wysyła panel rekrutacyjny (wymaga roli rekrutera).\n"
+            "`!backup [ID_kanału]` — wykonuje backup (wymaga uprawnień).\n"
+            "`!restore` — przywraca brakujące kanały (wymaga uprawnień).\n"
+            "`!test` — wysyła test na kanał testowy (tylko administrator bota).\n"
+            "`!update` — aktualizuje bota i restartuje usługę (tylko administrator bota).\n"
+            "`!systemctl status|start|stop|restart` — zarządza usługą "
+            "(tylko administrator bota; wymaga konfiguracji systemd)."
+        )
+        return
+
     if await channel_backup.handle_command(
         client,
         message,
