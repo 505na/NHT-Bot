@@ -174,7 +174,7 @@ async def on_message(message: discord.Message) -> None:
     if not message.content.startswith("!"):
         return
 
-    if message.content.strip().casefold() == "!help":
+    if message.content.strip().casefold() == "!cmd":
         await message.channel.send(
             "**Dostępne komendy:**\n"
             "`!rekru` — wysyła panel rekrutacyjny (wymaga roli rekrutera).\n"
