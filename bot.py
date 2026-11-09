@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import sys
 from datetime import timedelta
 
 import aiohttp
@@ -27,7 +28,6 @@ PROBOT_USER_ID = 282859044593598464
 PROBOT_WELCOME_CHANNEL_ID = 846065271675420737
 PROBOT_GOODBYE_CHANNEL_ID = 899304602292346891
 PROBOT_ANNOUNCEMENT_TIMEOUT = 15
-SYSTEMD_SERVICE_NAME = "nht-bot.service"
 
 if not TOKEN:
     raise RuntimeError("Brak DISCORD_TOKEN w pliku .env")
@@ -44,29 +44,15 @@ recent_voice_audit_entries: list[discord.AuditLogEntry] = []
 used_voice_move_audit_entry_ids: dict[int, int] = {}
 
 
+def reload_bot() -> None:
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
 def update_bot() -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", BOT_DIRECTORY, "pull", "--ff-only"],
         capture_output=True,
         text=True,
-        check=False,
-    )
-
-
-def manage_systemd_service(action: str) -> subprocess.CompletedProcess[str]:
-    if action not in {"start", "stop", "restart", "status"}:
-        raise ValueError(f"Nieobsługiwana akcja systemctl: {action}")
-
-    arguments = (
-        ["status", SYSTEMD_SERVICE_NAME, "--no-pager"]
-        if action == "status"
-        else ["--no-block", action, SYSTEMD_SERVICE_NAME]
-    )
-    return subprocess.run(
-        ["sudo", "-n", "/usr/bin/systemctl", *arguments],
-        capture_output=True,
-        text=True,
-        timeout=15,
         check=False,
     )
 
@@ -174,19 +160,6 @@ async def on_message(message: discord.Message) -> None:
     if not message.content.startswith("!"):
         return
 
-    if message.content.strip().casefold() == "!cmd":
-        await message.channel.send(
-            "**Dostępne komendy:**\n"
-            "`!rekru` — wysyła panel rekrutacyjny (wymaga roli rekrutera).\n"
-            "`!backup [ID_kanału]` — wykonuje backup (wymaga uprawnień).\n"
-            "`!restore` — przywraca brakujące kanały (wymaga uprawnień).\n"
-            "`!test` — wysyła test na kanał testowy (tylko administrator bota).\n"
-            "`!update` — aktualizuje bota i restartuje usługę (tylko administrator bota).\n"
-            "`!systemctl status|start|stop|restart` — zarządza usługą "
-            "(tylko administrator bota; wymaga konfiguracji systemd)."
-        )
-        return
-
     if await channel_backup.handle_command(
         client,
         message,
@@ -221,64 +194,7 @@ async def on_message(message: discord.Message) -> None:
         )
         return
 
-    command_parts = message.content.strip().casefold().split()
-    if command_parts and command_parts[0] == "!systemctl":
-        if len(command_parts) != 2 or command_parts[1] not in {
-            "start",
-            "stop",
-            "restart",
-            "status",
-        }:
-            await message.channel.send(
-                "Użycie: `!systemctl status|start|stop|restart`"
-            )
-            return
-
-        action = command_parts[1]
-        try:
-            result = await asyncio.to_thread(manage_systemd_service, action)
-        except (OSError, subprocess.TimeoutExpired):
-            logging.exception("Nie udało się wykonać systemctl %s.", action)
-            await message.channel.send(
-                "Nie udało się wykonać systemctl. Sprawdź, czy bot działa jako "
-                "usługa systemd oraz czy skonfigurowano uprawnienia sudo."
-            )
-            return
-
-        output = (result.stdout + result.stderr).strip()
-        if action == "status" and output:
-            safe_output = output.replace("```", "'''")[:1500]
-            await message.channel.send(
-                f"```text\n{safe_output}\n```",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        elif result.returncode != 0:
-            logging.error("systemctl %s nie powiódł się: %s", action, output)
-            safe_output = output.replace("```", "'''")[:1200]
-            lower_output = output.casefold()
-            authorization_hint = ""
-            if (
-                "interactive authentication" in lower_output
-                or "a password is required" in lower_output
-                or "not allowed to execute" in lower_output
-            ):
-                authorization_hint = (
-                    "\nBrak bezhasłowego uprawnienia sudo dla użytkownika usługi. "
-                    "Sprawdź `User=` w pliku usługi i regułę sudoers w "
-                    "`SYSTEMD.md`."
-                )
-            await message.channel.send(
-                f"Polecenie `systemctl {action}` nie powiodło się."
-                + authorization_hint
-                + (f"\n```text\n{safe_output}\n```" if safe_output else ""),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        else:
-            await message.channel.send(
-                f"Polecenie `systemctl {action}` zostało przyjęte dla "
-                f"`{SYSTEMD_SERVICE_NAME}`."
-            )
-    elif message.content.strip() == "!test":
+    if message.content.strip() == "!test":
         test_channel = client.get_channel(TEST_CHANNEL_ID)
         if not isinstance(test_channel, discord.TextChannel):
             logging.warning("Nie znaleziono kanału testowego %s", TEST_CHANNEL_ID)
@@ -300,6 +216,14 @@ async def on_message(message: discord.Message) -> None:
         embed.add_field(name="ID", value="100687914602183219", inline=False)
         embed.set_footer(text="18.08.2026 21:32")
         await test_channel.send(embed=embed)
+    elif message.content.strip() == "!reload":
+        await message.channel.send("Przeładowuję bota...")
+        await client.close()
+        reload_bot()
+    elif message.content.strip() == "!stop":
+        await message.channel.send("Zatrzymuję bota...")
+        await client.close()
+        os._exit(0)
     elif message.content.strip() == "!update":
         result = await asyncio.to_thread(update_bot)
         output = (result.stdout + result.stderr).strip()
@@ -312,34 +236,9 @@ async def on_message(message: discord.Message) -> None:
             return
 
         logging.info("Zaktualizowano bota z GitHub: %s", output or "brak zmian")
-        try:
-            restart_result = await asyncio.to_thread(
-                manage_systemd_service,
-                "restart",
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            logging.exception("Aktualizacja pobrana, ale restart usługi się nie udał.")
-            await message.channel.send(
-                "Aktualizacja została pobrana, ale restart usługi się nie powiódł. "
-                "Uruchom `!systemctl restart`."
-            )
-            return
-
-        if restart_result.returncode != 0:
-            restart_output = (restart_result.stdout + restart_result.stderr).strip()
-            logging.error(
-                "Aktualizacja pobrana, ale restart usługi się nie udał: %s",
-                restart_output,
-            )
-            await message.channel.send(
-                "Aktualizacja została pobrana, ale restart usługi się nie powiódł. "
-                "Uruchom `!systemctl restart`."
-            )
-            return
-
-        await message.channel.send(
-            "Bot został zaktualizowany. Restart usługi został zlecony."
-        )
+        await message.channel.send("Bot został zaktualizowany. Przeładowuję...")
+        await client.close()
+        reload_bot()
 
 
 async def on_member_join(member: discord.Member) -> None:
