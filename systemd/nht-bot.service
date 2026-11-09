@@ -1,0 +1,19 @@
+[Unit]
+Description=NHT Discord Bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=nht-bot
+Group=nht-bot
+WorkingDirectory=/opt/nht-bot
+EnvironmentFile=/opt/nht-bot/.env
+ExecStart=/opt/nht-bot/.venv/bin/python /opt/nht-bot/bot.py
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
