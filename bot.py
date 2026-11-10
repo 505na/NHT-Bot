@@ -160,6 +160,39 @@ async def on_message(message: discord.Message) -> None:
     if not message.content.startswith("!"):
         return
 
+    if message.content.strip().casefold() == "!cmd":
+        commands = ["`!cmd` — wyświetla listę dostępnych komend."]
+        if isinstance(message.author, discord.Member) and any(
+            role.id in tickets.RECRUITER_ROLE_IDS for role in message.author.roles
+        ):
+            commands.append("`!rekru` — wysyła panel rekrutacyjny.")
+        if message.author.id in (
+            channel_backup.EXTRA_AUTHORIZED_USER_IDS | {AUTHORIZED_USER_ID}
+        ):
+            commands.extend(
+                (
+                    "`!backup [ID_kanału]` — wykonuje backup kanałów.",
+                    "`!restore` — przywraca brakujące kanały i wiadomości.",
+                )
+            )
+        if message.author.id == AUTHORIZED_USER_ID:
+            commands.extend(
+                (
+                    "`!test` — wysyła test działania bota.",
+                    "`!reload` — uruchamia bota ponownie.",
+                    "`!stop` — zatrzymuje bota.",
+                    "`!update` — aktualizuje bota i uruchamia go ponownie.",
+                )
+            )
+
+        embed = discord.Embed(
+            title="Dostępne komendy",
+            description="\n".join(commands),
+            color=discord.Color.blurple(),
+        )
+        await message.channel.send(embed=embed)
+        return
+
     if await channel_backup.handle_command(
         client,
         message,
