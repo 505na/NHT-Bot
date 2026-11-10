@@ -3,7 +3,6 @@ import html
 import io
 import json
 import logging
-import os
 import re
 import unicodedata
 from collections import Counter
@@ -11,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import discord
+import mariadb
+from database import get_connection, initialize_schema
 
 RECRUITER_ROLE_IDS = (
     1477729438098788684,
@@ -97,11 +98,11 @@ def load_questionnaires() -> dict[int, Questionnaire]:
             questionnaires[questionnaire.channel_id] = questionnaire
         return questionnaires
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
-        logging.exception("Nie udało się wczytać zapisanych formularzy ticketów.")
+        logging.exception("Nie udało się wczytać formularzy ze starego pliku ticketów.")
         raise
 
 
-ACTIVE_QUESTIONNAIRES = load_questionnaires()
+ACTIVE_QUESTIONNAIRES: dict[int, Questionnaire] = {}
 
 
 def load_ticket_status() -> tuple[set[int], set[int]]:
@@ -122,40 +123,219 @@ def load_ticket_status() -> tuple[set[int], set[int]]:
             raise ValueError("Nieprawidłowy zapis statusów ticketów.")
         return set(closed_ids), set(transcript_ids)
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        logging.exception("Nie udało się wczytać statusów ticketów.")
+        logging.exception("Nie udało się wczytać statusów ze starego pliku ticketów.")
         raise
 
 
-CLOSED_TICKETS, TRANSCRIPTED_TICKETS = load_ticket_status()
+CLOSED_TICKETS: set[int] = set()
+TRANSCRIPTED_TICKETS: set[int] = set()
+QUESTIONNAIRE_WRITE_LOCK = asyncio.Lock()
+TICKET_STATUS_WRITE_LOCK = asyncio.Lock()
 
 
-def save_questionnaires() -> None:
-    state = {
-        str(channel_id): {
-            "member_id": questionnaire.member_id,
-            "answers": questionnaire.answers,
-        }
-        for channel_id, questionnaire in ACTIVE_QUESTIONNAIRES.items()
-    }
-    temporary_file = STATE_FILE.with_suffix(".tmp")
-    temporary_file.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    os.replace(temporary_file, STATE_FILE)
+def initialize_database_state() -> None:
+    initialize_schema()
+    connection = get_connection()
+    cursor = None
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT 1 FROM bot_schema_migrations WHERE migration_key = ?",
+            ("ticket_json_to_mariadb_v1",),
+        )
+        # The marker prevents deleted or completed tickets returning from old files.
+        if cursor.fetchone() is None:
+            legacy_questionnaires = load_questionnaires()
+            legacy_closed, legacy_transcripted = load_ticket_status()
+            if legacy_questionnaires:
+                cursor.executemany(
+                    """
+                    INSERT IGNORE INTO ticket_questionnaires (channel_id, member_id, answers)
+                    VALUES (?, ?, ?)
+                    """,
+                    [
+                        (
+                            questionnaire.channel_id,
+                            questionnaire.member_id,
+                            json.dumps(questionnaire.answers, ensure_ascii=False),
+                        )
+                        for questionnaire in legacy_questionnaires.values()
+                    ],
+                )
+
+            ticket_ids = legacy_closed | legacy_transcripted
+            if ticket_ids:
+                cursor.executemany(
+                    """
+                    INSERT IGNORE INTO ticket_status (channel_id, is_closed, transcript_sent)
+                    VALUES (?, ?, ?)
+                    """,
+                    [
+                        (
+                            channel_id,
+                            channel_id in legacy_closed,
+                            channel_id in legacy_transcripted,
+                        )
+                        for channel_id in ticket_ids
+                    ],
+                )
+
+            legacy_counter = 0
+            if TICKET_COUNTER_FILE.exists():
+                try:
+                    legacy_counter = int(
+                        TICKET_COUNTER_FILE.read_text(encoding="utf-8")
+                    )
+                except (OSError, ValueError):
+                    logging.exception("Nie udało się odczytać starego licznika ticketów.")
+                    raise
+                if legacy_counter < 0:
+                    raise ValueError("Licznik ticketów nie może być ujemny.")
+
+            cursor.execute(
+                """
+                INSERT INTO ticket_counter (counter_id, last_number)
+                VALUES (1, ?)
+                ON DUPLICATE KEY UPDATE last_number = GREATEST(last_number, VALUES(last_number))
+                """,
+                (legacy_counter,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO bot_schema_migrations (migration_key)
+                VALUES (?)
+                """,
+                ("ticket_json_to_mariadb_v1",),
+            )
+            connection.commit()
+
+        cursor.execute(
+            "SELECT channel_id, member_id, answers FROM ticket_questionnaires"
+        )
+        questionnaires: dict[int, Questionnaire] = {}
+        for channel_id, member_id, encoded_answers in cursor.fetchall():
+            answers = json.loads(encoded_answers)
+            if (
+                not isinstance(answers, list)
+                or len(answers) > len(QUESTIONS)
+                or not all(isinstance(answer, str) for answer in answers)
+            ):
+                raise ValueError(f"Nieprawidłowe odpowiedzi ticketu {channel_id}.")
+            questionnaires[int(channel_id)] = Questionnaire(
+                channel_id=int(channel_id),
+                member_id=int(member_id),
+                answers=answers,
+            )
+
+        cursor.execute(
+            "SELECT channel_id, is_closed, transcript_sent FROM ticket_status"
+        )
+        ticket_status = cursor.fetchall()
+        ACTIVE_QUESTIONNAIRES.clear()
+        ACTIVE_QUESTIONNAIRES.update(questionnaires)
+        CLOSED_TICKETS.clear()
+        TRANSCRIPTED_TICKETS.clear()
+        CLOSED_TICKETS.update(
+            int(channel_id)
+            for channel_id, is_closed, _ in ticket_status
+            if is_closed
+        )
+        TRANSCRIPTED_TICKETS.update(
+            int(channel_id)
+            for channel_id, _, transcript_sent in ticket_status
+            if transcript_sent
+        )
+        logging.info(
+            "Wczytano stan ticketów z MariaDB (%s formularzy).",
+            len(ACTIVE_QUESTIONNAIRES),
+        )
+    except (mariadb.Error, OSError, json.JSONDecodeError, TypeError, ValueError):
+        connection.rollback()
+        logging.exception("Nie udało się wczytać lub zmigrować stanu ticketów.")
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        connection.close()
 
 
-def save_ticket_status() -> None:
-    state = {
-        "closed": sorted(CLOSED_TICKETS),
-        "transcript_sent": sorted(TRANSCRIPTED_TICKETS),
-    }
-    temporary_file = TICKET_STATUS_FILE.with_suffix(".tmp")
-    temporary_file.write_text(
-        json.dumps(state, indent=2),
-        encoding="utf-8",
-    )
-    os.replace(temporary_file, TICKET_STATUS_FILE)
+def _save_questionnaire_snapshot(
+    questionnaires: tuple[tuple[int, int, str], ...],
+) -> None:
+    connection = get_connection()
+    cursor = None
+    try:
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM ticket_questionnaires")
+        if questionnaires:
+            cursor.executemany(
+                """
+                INSERT INTO ticket_questionnaires (channel_id, member_id, answers)
+                VALUES (?, ?, ?)
+                """,
+                questionnaires,
+            )
+        connection.commit()
+    except mariadb.Error:
+        connection.rollback()
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        connection.close()
+
+
+async def save_questionnaires() -> None:
+    async with QUESTIONNAIRE_WRITE_LOCK:
+        snapshot = tuple(
+            (
+                questionnaire.channel_id,
+                questionnaire.member_id,
+                json.dumps(questionnaire.answers, ensure_ascii=False),
+            )
+            for questionnaire in ACTIVE_QUESTIONNAIRES.values()
+        )
+        await asyncio.to_thread(_save_questionnaire_snapshot, snapshot)
+
+
+def _save_ticket_status_snapshot(
+    ticket_status: tuple[tuple[int, bool, bool], ...],
+) -> None:
+    connection = get_connection()
+    cursor = None
+    try:
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM ticket_status")
+        if ticket_status:
+            cursor.executemany(
+                """
+                INSERT INTO ticket_status (channel_id, is_closed, transcript_sent)
+                VALUES (?, ?, ?)
+                """,
+                ticket_status,
+            )
+        connection.commit()
+    except mariadb.Error:
+        connection.rollback()
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        connection.close()
+
+
+async def save_ticket_status() -> None:
+    async with TICKET_STATUS_WRITE_LOCK:
+        ticket_ids = CLOSED_TICKETS | TRANSCRIPTED_TICKETS
+        snapshot = tuple(
+            (
+                channel_id,
+                channel_id in CLOSED_TICKETS,
+                channel_id in TRANSCRIPTED_TICKETS,
+            )
+            for channel_id in ticket_ids
+        )
+        await asyncio.to_thread(_save_ticket_status_snapshot, snapshot)
 
 
 def get_ticket_owner_id(channel: discord.TextChannel) -> int | None:
@@ -177,30 +357,38 @@ async def reject_ticket_owner_interaction(
     return True
 
 
-def reserve_ticket_number(guild: discord.Guild) -> int:
-    last_number = 0
-    if TICKET_COUNTER_FILE.exists():
-        try:
-            last_number = int(TICKET_COUNTER_FILE.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            logging.exception("Nie udało się odczytać licznika ticketów.")
-            raise
-
-    for channel in guild.text_channels:
-        match = re.match(r"^ticket-(\d+)-", channel.name)
-        if match:
-            last_number = max(last_number, int(match.group(1)))
-
-    ticket_number = last_number + 1
-    temporary_file = TICKET_COUNTER_FILE.with_suffix(".tmp")
+def reserve_ticket_number(channel_names: tuple[str, ...]) -> int:
+    connection = get_connection()
+    cursor = None
     try:
-        temporary_file.write_text(str(ticket_number), encoding="utf-8")
-        os.replace(temporary_file, TICKET_COUNTER_FILE)
-    except OSError:
-        logging.exception("Nie udało się zapisać licznika ticketów.")
-        raise
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT last_number FROM ticket_counter WHERE counter_id = 1 FOR UPDATE"
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("Brak rekordu licznika ticketów w MariaDB.")
+        last_number = int(row[0])
 
-    return ticket_number
+        for channel_name in channel_names:
+            match = re.match(r"^ticket-(\d+)-", channel_name)
+            if match:
+                last_number = max(last_number, int(match.group(1)))
+
+        ticket_number = last_number + 1
+        cursor.execute(
+            "UPDATE ticket_counter SET last_number = ? WHERE counter_id = 1",
+            (ticket_number,),
+        )
+        connection.commit()
+        return ticket_number
+    except (mariadb.Error, RuntimeError):
+        connection.rollback()
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        connection.close()
 
 
 def get_ticket_name_slug(member: discord.Member) -> str:
@@ -258,8 +446,8 @@ class OpenTicketView(discord.ui.View):
                 )
                 ACTIVE_QUESTIONNAIRES[existing_ticket.id] = questionnaire
                 try:
-                    save_questionnaires()
-                except OSError:
+                    await save_questionnaires()
+                except (mariadb.Error, RuntimeError):
                     ACTIVE_QUESTIONNAIRES.pop(existing_ticket.id, None)
                     logging.exception(
                         "Nie udało się zapisać wznowionego formularza %s.",
@@ -278,8 +466,6 @@ class OpenTicketView(discord.ui.View):
                         member,
                         questionnaire.answers,
                     )
-                    ACTIVE_QUESTIONNAIRES.pop(existing_ticket.id, None)
-                    save_questionnaires()
                 except discord.HTTPException:
                     logging.exception(
                         "Nie udało się wznowić podsumowania ticketu %s.",
@@ -287,6 +473,21 @@ class OpenTicketView(discord.ui.View):
                     )
                     await interaction.followup.send(
                         "Nie udało się wysłać podsumowania. Spróbuj ponownie.",
+                        ephemeral=True,
+                    )
+                    return
+                ACTIVE_QUESTIONNAIRES.pop(existing_ticket.id, None)
+                try:
+                    await save_questionnaires()
+                except (mariadb.Error, RuntimeError):
+                    ACTIVE_QUESTIONNAIRES[existing_ticket.id] = questionnaire
+                    logging.exception(
+                        "Nie udało się usunąć zakończonego formularza %s z MariaDB.",
+                        existing_ticket.id,
+                    )
+                    await interaction.followup.send(
+                        "Podsumowanie wysłano, ale nie udało się zapisać zmiany "
+                        "w bazie. Powiadom obsługę serwera.",
                         ephemeral=True,
                     )
                     return
@@ -347,8 +548,11 @@ class OpenTicketView(discord.ui.View):
             )
 
         try:
-            ticket_number = reserve_ticket_number(guild)
-        except (OSError, ValueError):
+            ticket_number = await asyncio.to_thread(
+                reserve_ticket_number,
+                tuple(channel.name for channel in guild.text_channels),
+            )
+        except (mariadb.Error, RuntimeError):
             await interaction.followup.send(
                 "Nie udało się przygotować numeru ticketu. Spróbuj ponownie później.",
                 ephemeral=True,
@@ -396,8 +600,8 @@ class OpenTicketView(discord.ui.View):
             member_id=member.id,
         )
         try:
-            save_questionnaires()
-        except OSError:
+            await save_questionnaires()
+        except (mariadb.Error, RuntimeError):
             ACTIVE_QUESTIONNAIRES.pop(ticket_channel.id, None)
             logging.exception(
                 "Nie udało się zapisać stanu nowego ticketu %s.",
@@ -549,8 +753,8 @@ class ConfirmCloseTicketView(discord.ui.View):
                         read_message_history=True,
                     )
             CLOSED_TICKETS.add(channel.id)
-            save_ticket_status()
-        except (discord.HTTPException, OSError):
+            await save_ticket_status()
+        except (discord.HTTPException, mariadb.Error, RuntimeError):
             CLOSED_TICKETS.discard(channel.id)
             owner_id_text = (channel.topic or "").removeprefix(
                 TICKET_OWNER_TOPIC_PREFIX
@@ -770,8 +974,8 @@ class ClosedTicketView(discord.ui.View):
                 interaction.user,
             )
             TRANSCRIPTED_TICKETS.add(channel.id)
-            save_ticket_status()
-        except (discord.HTTPException, OSError, ValueError):
+            await save_ticket_status()
+        except (discord.HTTPException, mariadb.Error, RuntimeError, ValueError):
             TRANSCRIPTED_TICKETS.discard(channel.id)
             logging.exception(
                 "Nie udało się wysłać transkryptu ticketu %s.",
@@ -832,7 +1036,7 @@ class ClosedTicketView(discord.ui.View):
         try:
             CLOSED_TICKETS.discard(channel.id)
             TRANSCRIPTED_TICKETS.discard(channel.id)
-            save_ticket_status()
+            await save_ticket_status()
             await channel.set_permissions(
                 owner,
                 view_channel=True,
@@ -846,14 +1050,14 @@ class ClosedTicketView(discord.ui.View):
                 embed=None,
                 view=CloseTicketView(),
             )
-        except (discord.HTTPException, OSError):
+        except (discord.HTTPException, mariadb.Error, RuntimeError):
             if was_closed:
                 CLOSED_TICKETS.add(channel.id)
             if had_transcript:
                 TRANSCRIPTED_TICKETS.add(channel.id)
             try:
-                save_ticket_status()
-            except OSError:
+                await save_ticket_status()
+            except (mariadb.Error, RuntimeError):
                 logging.exception(
                     "Nie udało się przywrócić stanu zamkniętego ticketu %s.",
                     channel.id,
@@ -908,9 +1112,9 @@ class ClosedTicketView(discord.ui.View):
         CLOSED_TICKETS.discard(channel.id)
         TRANSCRIPTED_TICKETS.discard(channel.id)
         try:
-            save_questionnaires()
-            save_ticket_status()
-        except OSError:
+            await save_questionnaires()
+            await save_ticket_status()
+        except (mariadb.Error, RuntimeError):
             logging.exception(
                 "Nie udało się wyczyścić stanu usuniętego ticketu %s.",
                 channel.id,
@@ -1175,8 +1379,8 @@ async def ticket_channel_exists(
     except discord.NotFound:
         ACTIVE_QUESTIONNAIRES.pop(questionnaire.channel_id, None)
         try:
-            save_questionnaires()
-        except OSError:
+            await save_questionnaires()
+        except (mariadb.Error, RuntimeError):
             logging.exception(
                 "Nie udało się usunąć stanu usuniętego ticketu %s.",
                 questionnaire.channel_id,
@@ -1199,8 +1403,8 @@ async def ticket_channel_exists(
 
     ACTIVE_QUESTIONNAIRES.pop(questionnaire.channel_id, None)
     try:
-        save_questionnaires()
-    except OSError:
+        await save_questionnaires()
+    except (mariadb.Error, RuntimeError):
         logging.exception(
             "Nie udało się usunąć nieprawidłowego stanu ticketu %s.",
             questionnaire.channel_id,
@@ -1218,9 +1422,9 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
         changed = True
     if changed:
         try:
-            save_questionnaires()
-            save_ticket_status()
-        except OSError:
+            await save_questionnaires()
+            await save_ticket_status()
+        except (mariadb.Error, RuntimeError):
             logging.exception(
                 "Nie udało się usunąć stanu usuniętego ticketu %s.",
                 channel.id,
@@ -1384,8 +1588,8 @@ class AnswerQuestionModal(discord.ui.Modal):
         question = QUESTIONS[len(questionnaire.answers)]
         questionnaire.answers.append(answer)
         try:
-            save_questionnaires()
-        except OSError:
+            await save_questionnaires()
+        except (mariadb.Error, RuntimeError):
             questionnaire.answers.pop()
             logging.exception(
                 "Nie udało się zapisać odpowiedzi użytkownika %s.",
@@ -1436,12 +1640,19 @@ class AnswerQuestionModal(discord.ui.Modal):
 
         ACTIVE_QUESTIONNAIRES.pop(self.channel_id, None)
         try:
-            save_questionnaires()
-        except OSError:
+            await save_questionnaires()
+        except (mariadb.Error, RuntimeError):
+            ACTIVE_QUESTIONNAIRES[self.channel_id] = questionnaire
             logging.exception(
-                "Nie udało się usunąć zakończonego formularza %s ze stanu zapisanego na dysku.",
+                "Nie udało się usunąć zakończonego formularza %s z MariaDB.",
                 self.channel_id,
             )
+            await interaction.followup.send(
+                "Odpowiedzi wysłano, ale nie udało się zapisać zmiany w bazie. "
+                "Powiadom obsługę serwera.",
+                ephemeral=True,
+            )
+            return
         await interaction.followup.send(
             "Formularz został zakończony, a odpowiedzi wysłane w tickecie.",
             ephemeral=True,

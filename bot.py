@@ -7,6 +7,7 @@ from datetime import timedelta
 
 import aiohttp
 import discord
+import mariadb
 from dotenv import load_dotenv
 
 import channel_backup
@@ -71,6 +72,12 @@ def get_message_channel(guild: discord.Guild, channel_id: int) -> discord.TextCh
 
 async def on_ready() -> None:
     logging.info("Zalogowano jako %s", client.user)
+    try:
+        await asyncio.to_thread(tickets.initialize_database_state)
+    except (mariadb.Error, OSError, RuntimeError, TypeError, ValueError):
+        logging.exception("Nie można przygotować MariaDB; bot zostanie uruchomiony ponownie.")
+        await client.close()
+        return
     await client.change_presence(activity=discord.Game(name="by 505na"))
     channel_backup.start_scheduled_backup(client)
 
