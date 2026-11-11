@@ -109,7 +109,7 @@ def record_moderation_warning(
     user_id: int,
     moderator_id: int,
     reason: str,
-) -> None:
+) -> int:
     connection = get_connection()
     cursor = None
     try:
@@ -121,7 +121,17 @@ def record_moderation_warning(
             """,
             (guild_id, user_id, moderator_id, reason),
         )
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM moderation_warnings
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        warning_number = int(cursor.fetchone()[0])
         connection.commit()
+        return warning_number
     except mariadb.Error:
         connection.rollback()
         logging.exception("Nie udało się zapisać ostrzeżenia moderacyjnego.")

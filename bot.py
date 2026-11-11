@@ -221,7 +221,7 @@ async def handle_moderation_command(message: discord.Message) -> bool:
             await target.timeout(None, reason=reason)
             confirmation = f"Zdjęto timeout z {target.mention}. Powód: {reason}"
         else:
-            await asyncio.to_thread(
+            warning_number = await asyncio.to_thread(
                 record_moderation_warning,
                 message.guild.id,
                 target.id,
@@ -236,7 +236,7 @@ async def handle_moderation_command(message: discord.Message) -> bool:
                         f"Kanał ostrzeżeń {WARN_LOG_CHANNEL_ID} nie jest kanałem tekstowym."
                     )
                 warning_embed = discord.Embed(
-                    title="Nowe ostrzeżenie",
+                    title=f"Warn #{warning_number}",
                     color=discord.Color.orange(),
                     timestamp=discord.utils.utcnow(),
                 )
@@ -251,11 +251,6 @@ async def handle_moderation_command(message: discord.Message) -> bool:
                     inline=False,
                 )
                 warning_embed.add_field(name="Powód", value=reason, inline=False)
-                warning_embed.add_field(
-                    name="Serwer",
-                    value=f"{message.guild.name} (`{message.guild.id}`)",
-                    inline=False,
-                )
                 await warning_channel.send(embed=warning_embed)
             except discord.NotFound:
                 logging.error("Nie znaleziono kanału ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
