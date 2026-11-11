@@ -25,6 +25,7 @@ AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "0"))
 TEST_CHANNEL_ID = 1551275904280432683
 LOG_CHANNEL_ID = 1555304186231521341
 MESSAGE_LOG_CHANNEL_ID = 1560761928031272960
+WARN_LOG_CHANNEL_ID = 1266784825420025887
 WELCOME_TEMPLATE_USER_ID = 557628352828014614
 PROBOT_USER_ID = 282859044593598464
 PROBOT_WELCOME_CHANNEL_ID = 846065271675420737
@@ -228,6 +229,51 @@ async def handle_moderation_command(message: discord.Message) -> bool:
                 reason,
             )
             confirmation = f"Ostrzeżono {target.mention}. Powód: {reason}"
+            try:
+                warning_channel = await client.fetch_channel(WARN_LOG_CHANNEL_ID)
+                if not isinstance(warning_channel, discord.TextChannel):
+                    raise TypeError(
+                        f"Kanał ostrzeżeń {WARN_LOG_CHANNEL_ID} nie jest kanałem tekstowym."
+                    )
+                warning_embed = discord.Embed(
+                    title="Nowe ostrzeżenie",
+                    color=discord.Color.orange(),
+                    timestamp=discord.utils.utcnow(),
+                )
+                warning_embed.add_field(
+                    name="Użytkownik",
+                    value=f"{target} (`{target.id}`)",
+                    inline=False,
+                )
+                warning_embed.add_field(
+                    name="Moderator",
+                    value=f"{message.author} (`{message.author.id}`)",
+                    inline=False,
+                )
+                warning_embed.add_field(name="Powód", value=reason, inline=False)
+                warning_embed.add_field(
+                    name="Serwer",
+                    value=f"{message.guild.name} (`{message.guild.id}`)",
+                    inline=False,
+                )
+                await warning_channel.send(embed=warning_embed)
+            except discord.NotFound:
+                logging.error("Nie znaleziono kanału ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
+                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
+            except discord.Forbidden:
+                logging.exception(
+                    "Brak dostępu do kanału ostrzeżeń %s.", WARN_LOG_CHANNEL_ID
+                )
+                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
+            except discord.HTTPException:
+                logging.exception(
+                    "Nie udało się wysłać powiadomienia na kanał ostrzeżeń %s.",
+                    WARN_LOG_CHANNEL_ID,
+                )
+                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
+            except TypeError:
+                logging.exception("Nieprawidłowy kanał ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
+                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
         await message.channel.send(confirmation)
     except discord.Forbidden:
         await message.channel.send(
