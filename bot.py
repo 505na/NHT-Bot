@@ -47,6 +47,7 @@ recent_voice_audit_entries: list[discord.AuditLogEntry] = []
 used_voice_move_audit_entry_ids: dict[int, int] = {}
 MODERATION_PERMISSIONS = {
     "!ban": "ban_members",
+    "!unban": "ban_members",
     "!kick": "kick_members",
     "!timeout": "moderate_members",
     "!untimeout": "moderate_members",
@@ -139,6 +140,7 @@ async def handle_moderation_command(message: discord.Message) -> bool:
     if len(parts) < 2:
         usage = {
             "!ban": "`!ban @użytkownik [powód]`",
+            "!unban": "`!unban <ID_użytkownika> [powód]`",
             "!kick": "`!kick @użytkownik [powód]`",
             "!timeout": "`!timeout` / `!to` / `!t/o @użytkownik <minuty> [powód]`",
             "!untimeout": "`!untimeout @użytkownik [powód]`",
@@ -154,6 +156,35 @@ async def handle_moderation_command(message: discord.Message) -> bool:
         target_id_text = target_token
     if not target_id_text.isdigit():
         await message.channel.send("Podaj użytkownika przez wzmiankę lub jego ID.")
+        return True
+
+    if command == "!unban":
+        reason = " ".join(parts[2:]).strip() or "Nie podano powodu."
+        if len(reason) > 500:
+            await message.channel.send("Powód może mieć maksymalnie 500 znaków.")
+            return True
+
+        try:
+            ban_entry = await message.guild.fetch_ban(
+                discord.Object(id=int(target_id_text))
+            )
+            await message.guild.unban(ban_entry.user, reason=reason)
+            await message.channel.send(
+                f"Odblokowano {ban_entry.user} (`{ban_entry.user.id}`). Powód: {reason}"
+            )
+        except discord.NotFound:
+            await message.channel.send("Ten użytkownik nie jest zbanowany na tym serwerze.")
+        except discord.Forbidden:
+            await message.channel.send(
+                "Bot nie ma uprawnień do odbanowywania użytkowników."
+            )
+        except discord.HTTPException:
+            logging.exception(
+                "Nie udało się odbanować użytkownika %s na serwerze %s.",
+                target_id_text,
+                message.guild.id,
+            )
+            await message.channel.send("Nie udało się odbanować tego użytkownika.")
         return True
 
     try:
@@ -384,6 +415,7 @@ async def on_message(message: discord.Message) -> None:
         if isinstance(message.author, discord.Member):
             moderation_help = {
                 "!ban": "`!ban @użytkownik [powód]` — blokuje użytkownika.",
+                "!unban": "`!unban <ID_użytkownika> [powód]` — zdejmuje blokadę.",
                 "!kick": "`!kick @użytkownik [powód]` — wyrzuca użytkownika.",
                 "!timeout": "`!timeout` / `!to` / `!t/o @użytkownik <minuty> [powód]` — nakłada timeout.",
                 "!untimeout": "`!untimeout @użytkownik [powód]` — zdejmuje timeout.",
