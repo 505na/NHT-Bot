@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 import channel_backup
 import tickets
+from database import record_moderation_warning
 
 load_dotenv()
 
@@ -43,6 +44,18 @@ client: discord.Client
 BOT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 recent_voice_audit_entries: list[discord.AuditLogEntry] = []
 used_voice_move_audit_entry_ids: dict[int, int] = {}
+MODERATION_PERMISSIONS = {
+    "!ban": "ban_members",
+    "!kick": "kick_members",
+    "!timeout": "moderate_members",
+    "!untimeout": "moderate_members",
+    "!warn": "moderate_members",
+    "!clear": "manage_messages",
+}
+MODERATION_COMMAND_ALIASES = {
+    "!to": "!timeout",
+    "!t/o": "!timeout",
+}
 
 
 def reload_bot() -> None:
@@ -68,6 +81,164 @@ def get_message_channel(guild: discord.Guild, channel_id: int) -> discord.TextCh
         return guild.system_channel
 
     return None
+
+
+def can_use_moderation_command(
+    author: discord.abc.User,
+    command: str,
+) -> bool:
+    if author.id == AUTHORIZED_USER_ID:
+        return True
+    return (
+        isinstance(author, discord.Member)
+        and getattr(author.guild_permissions, MODERATION_PERMISSIONS[command])
+    )
+
+
+async def handle_moderation_command(message: discord.Message) -> bool:
+    parts = message.content.strip().split()
+    command = parts[0].casefold()
+    command = MODERATION_COMMAND_ALIASES.get(command, command)
+    if command not in MODERATION_PERMISSIONS:
+        return False
+
+    if message.guild is None or not isinstance(message.author, discord.Member):
+        await message.channel.send("Tej komendy można używać tylko na serwerze.")
+        return True
+
+    if not can_use_moderation_command(message.author, command):
+        await message.channel.send(
+            f"{message.author.mention}, nie masz uprawnienia do używania {command}."
+        )
+        return True
+
+    if command == "!clear":
+        if len(parts) != 2 or not parts[1].isdigit():
+            await message.channel.send("Użycie: `!clear <liczba 1-100>`")
+            return True
+        count = int(parts[1])
+        if not 1 <= count <= 100:
+            await message.channel.send("Możesz usunąć od 1 do 100 wiadomości.")
+            return True
+        if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
+            await message.channel.send("Tej komendy można używać tylko na kanale tekstowym.")
+            return True
+
+        try:
+            deleted = await message.channel.purge(limit=count + 1)
+            deleted_count = sum(deleted_message.id != message.id for deleted_message in deleted)
+            await message.channel.send(f"Usunięto {deleted_count} wiadomości.")
+        except discord.Forbidden:
+            await message.channel.send("Bot nie ma uprawnień do usuwania wiadomości na tym kanale.")
+        except discord.HTTPException:
+            logging.exception("Nie udało się usunąć wiadomości na kanale %s.", message.channel.id)
+            await message.channel.send("Nie udało się usunąć wiadomości.")
+        return True
+
+    if len(parts) < 2:
+        usage = {
+            "!ban": "`!ban @użytkownik [powód]`",
+            "!kick": "`!kick @użytkownik [powód]`",
+            "!timeout": "`!timeout` / `!to` / `!t/o @użytkownik <minuty> [powód]`",
+            "!untimeout": "`!untimeout @użytkownik [powód]`",
+            "!warn": "`!warn @użytkownik [powód]`",
+        }[command]
+        await message.channel.send(f"Użycie: {usage}")
+        return True
+
+    target_token = parts[1]
+    if target_token.startswith("<@") and target_token.endswith(">"):
+        target_id_text = target_token[2:-1].lstrip("!")
+    else:
+        target_id_text = target_token
+    if not target_id_text.isdigit():
+        await message.channel.send("Podaj użytkownika przez wzmiankę lub jego ID.")
+        return True
+
+    try:
+        target = message.guild.get_member(int(target_id_text))
+        if target is None:
+            target = await message.guild.fetch_member(int(target_id_text))
+    except discord.NotFound:
+        await message.channel.send("Nie znaleziono tego użytkownika na serwerze.")
+        return True
+    except discord.HTTPException:
+        logging.exception("Nie udało się pobrać członka serwera %s.", target_id_text)
+        await message.channel.send("Nie udało się pobrać danych tego użytkownika.")
+        return True
+
+    if target.id == message.author.id:
+        await message.channel.send("Nie możesz użyć tej komendy na sobie.")
+        return True
+    if client.user is not None and target.id == client.user.id:
+        await message.channel.send("Nie możesz użyć tej komendy na bocie.")
+        return True
+    if target.id == message.guild.owner_id:
+        await message.channel.send("Nie można moderować właściciela serwera.")
+        return True
+    if (
+        message.author.id not in (message.guild.owner_id, AUTHORIZED_USER_ID)
+        and target.top_role >= message.author.top_role
+    ):
+        await message.channel.send(
+            "Nie możesz moderować osoby z równą lub wyższą rolą."
+        )
+        return True
+
+    reason_start = 2
+    if command == "!timeout":
+        if len(parts) < 3 or not parts[2].isdigit():
+            await message.channel.send(
+                "Użycie: `!timeout` / `!to` / `!t/o @użytkownik <minuty> [powód]`"
+            )
+            return True
+        timeout_minutes = int(parts[2])
+        if not 1 <= timeout_minutes <= 28 * 24 * 60:
+            await message.channel.send("Timeout musi trwać od 1 minuty do 28 dni.")
+            return True
+        reason_start = 3
+
+    reason = " ".join(parts[reason_start:]).strip() or "Nie podano powodu."
+    if len(reason) > 500:
+        await message.channel.send("Powód może mieć maksymalnie 500 znaków.")
+        return True
+
+    try:
+        if command == "!ban":
+            await target.ban(reason=reason)
+            confirmation = f"Zbanowano {target.mention}. Powód: {reason}"
+        elif command == "!kick":
+            await target.kick(reason=reason)
+            confirmation = f"Wyrzucono {target.mention}. Powód: {reason}"
+        elif command == "!timeout":
+            await target.timeout(timedelta(minutes=timeout_minutes), reason=reason)
+            confirmation = (
+                f"Nałożono timeout na {target.mention} na {timeout_minutes} min. "
+                f"Powód: {reason}"
+            )
+        elif command == "!untimeout":
+            await target.timeout(None, reason=reason)
+            confirmation = f"Zdjęto timeout z {target.mention}. Powód: {reason}"
+        else:
+            await asyncio.to_thread(
+                record_moderation_warning,
+                message.guild.id,
+                target.id,
+                message.author.id,
+                reason,
+            )
+            confirmation = f"Ostrzeżono {target.mention}. Powód: {reason}"
+        await message.channel.send(confirmation)
+    except discord.Forbidden:
+        await message.channel.send(
+            "Bot nie ma uprawnień do wykonania tej akcji albo jego rola jest za nisko."
+        )
+    except discord.HTTPException:
+        logging.exception("Nie udało się wykonać komendy %s na użytkowniku %s.", command, target.id)
+        await message.channel.send("Nie udało się wykonać tej akcji.")
+    except mariadb.Error:
+        await message.channel.send("Nie udało się zapisać ostrzeżenia w bazie danych.")
+    return True
 
 
 async def on_ready() -> None:
@@ -169,6 +340,20 @@ async def on_message(message: discord.Message) -> None:
 
     if message.content.strip().casefold() == "!cmd":
         commands = ["`!cmd` — wyświetla listę dostępnych komend."]
+        if isinstance(message.author, discord.Member):
+            moderation_help = {
+                "!ban": "`!ban @użytkownik [powód]` — blokuje użytkownika.",
+                "!kick": "`!kick @użytkownik [powód]` — wyrzuca użytkownika.",
+                "!timeout": "`!timeout` / `!to` / `!t/o @użytkownik <minuty> [powód]` — nakłada timeout.",
+                "!untimeout": "`!untimeout @użytkownik [powód]` — zdejmuje timeout.",
+                "!warn": "`!warn @użytkownik [powód]` — zapisuje ostrzeżenie.",
+                "!clear": "`!clear <liczba 1-100>` — usuwa wiadomości.",
+            }
+            commands.extend(
+                description
+                for command, description in moderation_help.items()
+                if can_use_moderation_command(message.author, command)
+            )
         if isinstance(message.author, discord.Member) and any(
             role.id in tickets.RECRUITER_ROLE_IDS for role in message.author.roles
         ):
@@ -205,6 +390,9 @@ async def on_message(message: discord.Message) -> None:
         message,
         AUTHORIZED_USER_ID,
     ):
+        return
+
+    if await handle_moderation_command(message):
         return
 
     if message.content.strip() == "!rekru":
