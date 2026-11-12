@@ -353,49 +353,6 @@ async def handle_moderation_command(message: discord.Message) -> bool:
             f"Usunięto ostrzeżenie #{warning_number} dla użytkownika "
             f"`{target_user_id}`."
         )
-        try:
-            warning_channel = await client.fetch_channel(WARN_LOG_CHANNEL_ID)
-            if not isinstance(warning_channel, discord.TextChannel):
-                raise TypeError(
-                    f"Kanał ostrzeżeń {WARN_LOG_CHANNEL_ID} nie jest kanałem tekstowym."
-                )
-            warning_embed = discord.Embed(
-                title=f"Usunięto warn #{warning_number}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow(),
-            )
-            warning_embed.add_field(
-                name="Użytkownik",
-                value=f"<@{target_user_id}> (`{target_user_id}`)",
-                inline=False,
-            )
-            warning_embed.add_field(
-                name="Moderator",
-                value=f"{message.author} (`{message.author.id}`)",
-                inline=False,
-            )
-            await warning_channel.send(
-                embed=warning_embed,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except discord.NotFound:
-            logging.error("Nie znaleziono kanału ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
-            confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
-        except discord.Forbidden:
-            logging.exception(
-                "Brak dostępu do kanału ostrzeżeń %s.", WARN_LOG_CHANNEL_ID
-            )
-            confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
-        except discord.HTTPException:
-            logging.exception(
-                "Nie udało się wysłać powiadomienia na kanał ostrzeżeń %s.",
-                WARN_LOG_CHANNEL_ID,
-            )
-            confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
-        except TypeError:
-            logging.exception("Nieprawidłowy kanał ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
-            confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
-
         await message.channel.send(confirmation)
         return True
 
