@@ -186,18 +186,23 @@ async def handle_moderation_command(message: discord.Message) -> bool:
             await message.channel.send("Nie znaleziono żadnych ostrzeżeń.")
             return True
 
-        lines = [
+        entries = [
             (
-                f"#{warning_number} | Użytkownik: <@{warned_user_id}> "
-                f"({warned_user_id}) | Moderator: <@{moderator_id}> "
-                f"({moderator_id}) | Data: {created_at} | Powód: {reason}"
+                f"Ostrzeżenie #{warning_number} • Użytkownik {warned_user_id}",
+                (
+                    f"**Użytkownik:** <@{warned_user_id}> (`{warned_user_id}`)\n"
+                    f"**Moderator:** <@{moderator_id}> (`{moderator_id}`)\n"
+                    f"**Data:** {created_at:%d.%m.%Y %H:%M}\n"
+                    f"**Powód:** {reason}"
+                ),
             )
             for warning_number, warned_user_id, moderator_id, reason, created_at in warnings
         ]
         await send_moderation_list_pages(
             message,
-            f"Ostrzeżenia — {'wszyscy' if target_user_id is None else target_user_id}",
-            lines,
+            f"Ostrzeżenia — {'wszyscy użytkownicy' if target_user_id is None else target_user_id}",
+            entries,
+            color=discord.Color.orange(),
         )
         return True
 
@@ -244,7 +249,7 @@ async def handle_moderation_command(message: discord.Message) -> bool:
                 message.guild.id,
             )
 
-        lines = []
+        entries = []
         for ban in bans:
             audit_details = ban_audit_details.get(ban.user.id)
             if audit_details is None:
@@ -254,12 +259,24 @@ async def handle_moderation_command(message: discord.Message) -> bool:
             else:
                 moderator, audit_reason, created_at = audit_details
                 reason = ban.reason or audit_reason
-            lines.append(
-                f"{ban.user} (ID: {ban.user.id}) | Moderator: {moderator} | "
-                f"Data: {created_at} | Powód: {reason}"
+            entries.append(
+                (
+                    f"{ban.user} • {ban.user.id}",
+                    (
+                        f"**Użytkownik:** {ban.user.mention} (`{ban.user.id}`)\n"
+                        f"**Moderator:** {moderator}\n"
+                        f"**Data:** {created_at}\n"
+                        f"**Powód:** {reason}"
+                    ),
+                )
             )
 
-        await send_moderation_list_pages(message, "Lista banów", lines)
+        await send_moderation_list_pages(
+            message,
+            f"Lista banów • {len(entries)}",
+            entries,
+            color=discord.Color.dark_red(),
+        )
         return True
 
     if len(parts) < 2:
@@ -964,24 +981,32 @@ async def send_moderation_log(
 async def send_moderation_list_pages(
     message: discord.Message,
     title: str,
-    lines: list[str],
+    entries: list[tuple[str, str]],
+    *,
+    color: discord.Color,
 ) -> None:
-    page_limit = 1700
-    pages: list[str] = []
-    current_page = ""
-    for line in lines:
-        line = line[:page_limit]
-        if current_page and len(current_page) + len(line) + 1 > page_limit:
-            pages.append(current_page)
-            current_page = ""
-        current_page = f"{current_page}\n{line}" if current_page else line
-    if current_page:
-        pages.append(current_page)
+    entries_per_page = 5
+    page_count = (len(entries) + entries_per_page - 1) // entries_per_page
 
     try:
-        for page_number, page in enumerate(pages, start=1):
+        for page_number, start in enumerate(
+            range(0, len(entries), entries_per_page),
+            start=1,
+        ):
+            embed = discord.Embed(
+                title=title[:256],
+                color=color,
+                timestamp=discord.utils.utcnow(),
+            )
+            for name, value in entries[start : start + entries_per_page]:
+                embed.add_field(
+                    name=name[:120],
+                    value=f"{value[:897]}..." if len(value) > 900 else value,
+                    inline=False,
+                )
+            embed.set_footer(text=f"Strona {page_number}/{page_count} • Łącznie: {len(entries)}")
             await message.channel.send(
-                f"**{title} ({page_number}/{len(pages)})**\n{page}",
+                embed=embed,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
     except discord.Forbidden:
