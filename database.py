@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime
 
 import mariadb
 from dotenv import load_dotenv
@@ -79,12 +80,48 @@ def initialize_schema() -> None:
                 guild_id BIGINT UNSIGNED NOT NULL,
                 user_id BIGINT UNSIGNED NOT NULL,
                 moderator_id BIGINT UNSIGNED NOT NULL,
+                warning_number BIGINT UNSIGNED NOT NULL,
                 reason VARCHAR(1000) NOT NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                INDEX moderation_warnings_member (guild_id, user_id)
+                INDEX moderation_warnings_member (guild_id, user_id),
+                UNIQUE INDEX moderation_warnings_number (guild_id, user_id, warning_number)
             ) ENGINE=InnoDB
             """
         )
+        cursor.execute("SHOW COLUMNS FROM moderation_warnings LIKE 'warning_number'")
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "ALTER TABLE moderation_warnings "
+                "ADD COLUMN warning_number BIGINT UNSIGNED NULL"
+            )
+            cursor.execute(
+                """
+                SELECT warning_id, guild_id, user_id
+                FROM moderation_warnings
+                ORDER BY guild_id, user_id, warning_id
+                """
+            )
+            warning_counts: dict[tuple[int, int], int] = {}
+            for warning_id, guild_id, user_id in cursor.fetchall():
+                member_key = (int(guild_id), int(user_id))
+                warning_counts[member_key] = warning_counts.get(member_key, 0) + 1
+                cursor.execute(
+                    """
+                    UPDATE moderation_warnings
+                    SET warning_number = ?
+                    WHERE warning_id = ?
+                    """,
+                    (warning_counts[member_key], warning_id),
+                )
+            cursor.execute(
+                "ALTER TABLE moderation_warnings "
+                "MODIFY warning_number BIGINT UNSIGNED NOT NULL"
+            )
+            cursor.execute(
+                "ALTER TABLE moderation_warnings "
+                "ADD UNIQUE INDEX moderation_warnings_number "
+                "(guild_id, user_id, warning_number)"
+            )
         cursor.execute(
             """
             INSERT INTO ticket_counter (counter_id, last_number)
@@ -116,25 +153,103 @@ def record_moderation_warning(
         cursor = connection.cursor()
         cursor.execute(
             """
-            INSERT INTO moderation_warnings (guild_id, user_id, moderator_id, reason)
-            VALUES (?, ?, ?, ?)
-            """,
-            (guild_id, user_id, moderator_id, reason),
-        )
-        cursor.execute(
-            """
-            SELECT COUNT(*)
+            SELECT COALESCE(MAX(warning_number), 0) + 1
             FROM moderation_warnings
             WHERE guild_id = ? AND user_id = ?
             """,
             (guild_id, user_id),
         )
         warning_number = int(cursor.fetchone()[0])
+        cursor.execute(
+            """
+            INSERT INTO moderation_warnings
+                (guild_id, user_id, moderator_id, warning_number, reason)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (guild_id, user_id, moderator_id, warning_number, reason),
+        )
         connection.commit()
         return warning_number
     except mariadb.Error:
         connection.rollback()
         logging.exception("Nie udało się zapisać ostrzeżenia moderacyjnego.")
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        connection.close()
+
+
+def remove_moderation_warning(
+    guild_id: int,
+    user_id: int,
+    warning_number: int,
+) -> bool:
+    connection = get_connection()
+    cursor = None
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            DELETE FROM moderation_warnings
+            WHERE guild_id = ? AND user_id = ? AND warning_number = ?
+            """,
+            (guild_id, user_id, warning_number),
+        )
+        warning_removed = cursor.rowcount > 0
+        connection.commit()
+        return warning_removed
+    except mariadb.Error:
+        connection.rollback()
+        logging.exception("Nie udało się usunąć ostrzeżenia moderacyjnego.")
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        connection.close()
+
+
+def get_moderation_warnings(
+    guild_id: int,
+    user_id: int | None = None,
+) -> list[tuple[int, int, int, str, datetime]]:
+    connection = get_connection()
+    cursor = None
+    try:
+        cursor = connection.cursor()
+        if user_id is None:
+            cursor.execute(
+                """
+                SELECT warning_number, user_id, moderator_id, reason, created_at
+                FROM moderation_warnings
+                WHERE guild_id = ?
+                ORDER BY created_at DESC, warning_id DESC
+                """,
+                (guild_id,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT warning_number, user_id, moderator_id, reason, created_at
+                FROM moderation_warnings
+                WHERE guild_id = ? AND user_id = ?
+                ORDER BY created_at DESC, warning_id DESC
+                """,
+                (guild_id, user_id),
+            )
+        return [
+            (
+                int(warning_number),
+                int(warned_user_id),
+                int(moderator_id),
+                str(reason),
+                created_at,
+            )
+            for warning_number, warned_user_id, moderator_id, reason, created_at
+            in cursor.fetchall()
+        ]
+    except mariadb.Error:
+        logging.exception("Nie udało się pobrać ostrzeżeń moderacyjnych.")
         raise
     finally:
         if cursor is not None:

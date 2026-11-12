@@ -12,7 +12,11 @@ from dotenv import load_dotenv
 
 import channel_backup
 import tickets
-from database import record_moderation_warning
+from database import (
+    get_moderation_warnings,
+    record_moderation_warning,
+    remove_moderation_warning,
+)
 
 load_dotenv()
 
@@ -52,6 +56,9 @@ MODERATION_PERMISSIONS = {
     "!timeout": "moderate_members",
     "!untimeout": "moderate_members",
     "!warn": "moderate_members",
+    "!unwarn": "moderate_members",
+    "!warnlist": "moderate_members",
+    "!banlist": "ban_members",
     "!clear": "manage_messages",
 }
 MODERATION_COMMAND_ALIASES = {
@@ -131,12 +138,128 @@ async def handle_moderation_command(message: discord.Message) -> bool:
         try:
             deleted = await message.channel.purge(limit=count + 1)
             deleted_count = sum(deleted_message.id != message.id for deleted_message in deleted)
+            await send_moderation_log(
+                message,
+                "Wyczyszczenie wiadomości",
+                details={"Usunięte wiadomości": str(deleted_count)},
+            )
             await message.channel.send(f"Usunięto {deleted_count} wiadomości.")
         except discord.Forbidden:
             await message.channel.send("Bot nie ma uprawnień do usuwania wiadomości na tym kanale.")
         except discord.HTTPException:
             logging.exception("Nie udało się usunąć wiadomości na kanale %s.", message.channel.id)
             await message.channel.send("Nie udało się usunąć wiadomości.")
+        return True
+
+    if command == "!warnlist":
+        if len(parts) != 2:
+            await message.channel.send(
+                "Użycie: `!warnlist all` lub `!warnlist @użytkownik`"
+            )
+            return True
+
+        target_user_id = None
+        if parts[1].casefold() != "all":
+            target_token = parts[1]
+            if target_token.startswith("<@") and target_token.endswith(">"):
+                target_id_text = target_token[2:-1].lstrip("!")
+            else:
+                target_id_text = target_token
+            if not target_id_text.isdigit():
+                await message.channel.send(
+                    "Podaj `all` albo użytkownika przez wzmiankę lub ID."
+                )
+                return True
+            target_user_id = int(target_id_text)
+
+        try:
+            warnings = await asyncio.to_thread(
+                get_moderation_warnings,
+                message.guild.id,
+                target_user_id,
+            )
+        except mariadb.Error:
+            await message.channel.send("Nie udało się pobrać ostrzeżeń z bazy danych.")
+            return True
+
+        if not warnings:
+            await message.channel.send("Nie znaleziono żadnych ostrzeżeń.")
+            return True
+
+        lines = [
+            (
+                f"#{warning_number} | Użytkownik: <@{warned_user_id}> "
+                f"({warned_user_id}) | Moderator: <@{moderator_id}> "
+                f"({moderator_id}) | Data: {created_at} | Powód: {reason}"
+            )
+            for warning_number, warned_user_id, moderator_id, reason, created_at in warnings
+        ]
+        await send_moderation_list_pages(
+            message,
+            f"Ostrzeżenia — {'wszyscy' if target_user_id is None else target_user_id}",
+            lines,
+        )
+        return True
+
+    if command == "!banlist":
+        if len(parts) > 2 or (len(parts) == 2 and parts[1].casefold() != "all"):
+            await message.channel.send("Użycie: `!banlist`")
+            return True
+
+        try:
+            bans = [ban async for ban in message.guild.bans(limit=None)]
+        except discord.Forbidden:
+            await message.channel.send("Bot nie ma uprawnień do wyświetlenia listy banów.")
+            return True
+        except discord.HTTPException:
+            logging.exception("Nie udało się pobrać listy banów serwera %s.", message.guild.id)
+            await message.channel.send("Nie udało się pobrać listy banów.")
+            return True
+
+        if not bans:
+            await message.channel.send("Na tym serwerze nie ma żadnych banów.")
+            return True
+
+        ban_audit_details: dict[int, tuple[str, str, str]] = {}
+        try:
+            async for entry in message.guild.audit_logs(
+                limit=None,
+                action=discord.AuditLogAction.ban,
+            ):
+                if entry.target is not None and entry.target.id not in ban_audit_details:
+                    moderator = str(entry.user) if entry.user is not None else "Nieznany"
+                    ban_audit_details[entry.target.id] = (
+                        moderator,
+                        entry.reason or "Brak",
+                        str(entry.created_at),
+                    )
+        except discord.Forbidden:
+            logging.warning(
+                "Brak uprawnień do odczytu dziennika audytu banów serwera %s.",
+                message.guild.id,
+            )
+        except discord.HTTPException:
+            logging.exception(
+                "Nie udało się odczytać dziennika audytu banów serwera %s.",
+                message.guild.id,
+            )
+
+        lines = []
+        for ban in bans:
+            audit_details = ban_audit_details.get(ban.user.id)
+            if audit_details is None:
+                moderator = "Nieznany (brak wpisu w dzienniku audytu)"
+                reason = ban.reason or "Brak"
+                created_at = "Nieznana"
+            else:
+                moderator, audit_reason, created_at = audit_details
+                reason = ban.reason or audit_reason
+            lines.append(
+                f"{ban.user} (ID: {ban.user.id}) | Moderator: {moderator} | "
+                f"Data: {created_at} | Powód: {reason}"
+            )
+
+        await send_moderation_list_pages(message, "Lista banów", lines)
         return True
 
     if len(parts) < 2:
@@ -147,6 +270,7 @@ async def handle_moderation_command(message: discord.Message) -> bool:
             "!timeout": "`!timeout` / `!to` / `!t/o @użytkownik <minuty> [powód]`",
             "!untimeout": "`!untimeout @użytkownik [powód]`",
             "!warn": "`!warn @użytkownik [powód]`",
+            "!unwarn": "`!unwarn @użytkownik <numer_ostrzeżenia>`",
         }[command]
         await message.channel.send(f"Użycie: {usage}")
         return True
@@ -158,6 +282,13 @@ async def handle_moderation_command(message: discord.Message) -> bool:
         target_id_text = target_token
     if not target_id_text.isdigit():
         await message.channel.send("Podaj użytkownika przez wzmiankę lub jego ID.")
+        return True
+    if command == "!unwarn" and (
+        len(parts) != 3 or not parts[2].isdigit() or int(parts[2]) < 1
+    ):
+        await message.channel.send(
+            "Użycie: `!unwarn @użytkownik <numer_ostrzeżenia>`"
+        )
         return True
 
     if command == "!unban":
@@ -254,20 +385,40 @@ async def handle_moderation_command(message: discord.Message) -> bool:
             confirmation = f"Wyrzucono {target.mention}. Powód: {reason}"
         elif command == "!timeout":
             await target.timeout(timedelta(minutes=timeout_minutes), reason=reason)
+            await send_moderation_log(
+                message,
+                "Nałożenie timeoutu",
+                target=target,
+                reason=reason,
+                details={"Czas trwania": f"{timeout_minutes} min"},
+            )
             confirmation = (
                 f"Nałożono timeout na {target.mention} na {timeout_minutes} min. "
                 f"Powód: {reason}"
             )
         elif command == "!untimeout":
             await target.timeout(None, reason=reason)
+            await send_moderation_log(
+                message,
+                "Zdjęcie timeoutu",
+                target=target,
+                reason=reason,
+            )
             confirmation = f"Zdjęto timeout z {target.mention}. Powód: {reason}"
-        else:
+        elif command == "!warn":
             warning_number = await asyncio.to_thread(
                 record_moderation_warning,
                 message.guild.id,
                 target.id,
                 message.author.id,
                 reason,
+            )
+            await send_moderation_log(
+                message,
+                "Ostrzeżenie użytkownika",
+                target=target,
+                reason=reason,
+                details={"Numer ostrzeżenia": str(warning_number)},
             )
             confirmation = f"Ostrzeżono {target.mention}. Powód: {reason}"
             try:
@@ -310,6 +461,68 @@ async def handle_moderation_command(message: discord.Message) -> bool:
             except TypeError:
                 logging.exception("Nieprawidłowy kanał ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
                 confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
+        else:
+            warning_number = int(parts[2])
+            warning_removed = await asyncio.to_thread(
+                remove_moderation_warning,
+                message.guild.id,
+                target.id,
+                warning_number,
+            )
+            if not warning_removed:
+                await message.channel.send(
+                    f"Nie znaleziono ostrzeżenia #{warning_number} dla {target.mention}."
+                )
+                return True
+
+            await send_moderation_log(
+                message,
+                "Usunięcie ostrzeżenia",
+                target=target,
+                details={"Numer ostrzeżenia": str(warning_number)},
+            )
+            confirmation = (
+                f"Usunięto ostrzeżenie #{warning_number} dla {target.mention}."
+            )
+            try:
+                warning_channel = await client.fetch_channel(WARN_LOG_CHANNEL_ID)
+                if not isinstance(warning_channel, discord.TextChannel):
+                    raise TypeError(
+                        f"Kanał ostrzeżeń {WARN_LOG_CHANNEL_ID} nie jest kanałem tekstowym."
+                    )
+                warning_embed = discord.Embed(
+                    title=f"Usunięto warn #{warning_number}",
+                    color=discord.Color.green(),
+                    timestamp=discord.utils.utcnow(),
+                )
+                warning_embed.add_field(
+                    name="Użytkownik",
+                    value=f"{target} (`{target.id}`)",
+                    inline=False,
+                )
+                warning_embed.add_field(
+                    name="Moderator",
+                    value=f"{message.author} (`{message.author.id}`)",
+                    inline=False,
+                )
+                await warning_channel.send(embed=warning_embed)
+            except discord.NotFound:
+                logging.error("Nie znaleziono kanału ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
+                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
+            except discord.Forbidden:
+                logging.exception(
+                    "Brak dostępu do kanału ostrzeżeń %s.", WARN_LOG_CHANNEL_ID
+                )
+                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
+            except discord.HTTPException:
+                logging.exception(
+                    "Nie udało się wysłać powiadomienia na kanał ostrzeżeń %s.",
+                    WARN_LOG_CHANNEL_ID,
+                )
+                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
+            except TypeError:
+                logging.exception("Nieprawidłowy kanał ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
+                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
         await message.channel.send(confirmation)
     except discord.Forbidden:
         await message.channel.send(
@@ -319,7 +532,10 @@ async def handle_moderation_command(message: discord.Message) -> bool:
         logging.exception("Nie udało się wykonać komendy %s na użytkowniku %s.", command, target.id)
         await message.channel.send("Nie udało się wykonać tej akcji.")
     except mariadb.Error:
-        await message.channel.send("Nie udało się zapisać ostrzeżenia w bazie danych.")
+        if command == "!unwarn":
+            await message.channel.send("Nie udało się usunąć ostrzeżenia z bazy danych.")
+        else:
+            await message.channel.send("Nie udało się zapisać ostrzeżenia w bazie danych.")
     return True
 
 
@@ -430,6 +646,9 @@ async def on_message(message: discord.Message) -> None:
                 "!timeout": "`!timeout` / `!to` / `!t/o @użytkownik <minuty> [powód]` — nakłada timeout.",
                 "!untimeout": "`!untimeout @użytkownik [powód]` — zdejmuje timeout.",
                 "!warn": "`!warn @użytkownik [powód]` — zapisuje ostrzeżenie.",
+                "!unwarn": "`!unwarn @użytkownik <numer>` — usuwa ostrzeżenie.",
+                "!warnlist": "`!warnlist all` / `!warnlist @użytkownik` — wyświetla ostrzeżenia.",
+                "!banlist": "`!banlist` — wyświetla wszystkie bany.",
                 "!clear": "`!clear <liczba 1-100>` — usuwa wiadomości.",
             }
             commands.extend(
@@ -689,6 +908,7 @@ async def send_message_log_embed(
 ) -> None:
     log_channel = get_message_channel(guild, MESSAGE_LOG_CHANNEL_ID)
     if log_channel is None:
+        logging.warning("Nie znaleziono kanału logów na serwerze %s.", guild.id)
         return
 
     embed = discord.Embed(title=title, description=description, color=color, timestamp=discord.utils.utcnow())
@@ -702,6 +922,78 @@ async def send_message_log_embed(
             embed.add_field(name=name, value=value[:1024] or "Brak", inline=False)
 
     await log_channel.send(embed=embed)
+
+
+async def send_moderation_log(
+    message: discord.Message,
+    action: str,
+    *,
+    target: discord.abc.User | None = None,
+    reason: str | None = None,
+    details: dict[str, str] | None = None,
+) -> None:
+    guild = message.guild
+    if guild is None:
+        return
+
+    fields = {
+        "Moderator": f"{message.author} (`{message.author.id}`)",
+    }
+    if target is not None:
+        fields["Użytkownik"] = f"{target} (`{target.id}`)"
+    if reason is not None:
+        fields["Powód"] = reason
+    if details is not None:
+        fields.update(details)
+
+    try:
+        await send_message_log_embed(
+            guild,
+            action,
+            "Wykonano czynność moderacyjną.",
+            discord.Color.orange(),
+            channel=message.channel,
+            fields=fields,
+        )
+    except discord.Forbidden:
+        logging.warning("Brak uprawnień do wysłania logu moderacji na serwerze %s.", guild.id)
+    except discord.HTTPException:
+        logging.exception("Nie udało się wysłać logu moderacji na serwerze %s.", guild.id)
+
+
+async def send_moderation_list_pages(
+    message: discord.Message,
+    title: str,
+    lines: list[str],
+) -> None:
+    page_limit = 1700
+    pages: list[str] = []
+    current_page = ""
+    for line in lines:
+        line = line[:page_limit]
+        if current_page and len(current_page) + len(line) + 1 > page_limit:
+            pages.append(current_page)
+            current_page = ""
+        current_page = f"{current_page}\n{line}" if current_page else line
+    if current_page:
+        pages.append(current_page)
+
+    try:
+        for page_number, page in enumerate(pages, start=1):
+            await message.channel.send(
+                f"**{title} ({page_number}/{len(pages)})**\n{page}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+    except discord.Forbidden:
+        logging.warning(
+            "Brak uprawnień do wysłania listy moderacyjnej na kanale %s.",
+            message.channel.id,
+        )
+    except discord.HTTPException:
+        logging.exception(
+            "Nie udało się wysłać listy moderacyjnej na kanale %s.",
+            message.channel.id,
+        )
 
 
 async def send_deleted_message_log_embed(
@@ -1192,23 +1484,72 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     )
 
 
+async def get_moderation_audit_fields(
+    guild: discord.Guild,
+    action: discord.AuditLogAction,
+    target_id: int,
+) -> dict[str, str]:
+    try:
+        cutoff = discord.utils.utcnow() - timedelta(seconds=30)
+        async for entry in guild.audit_logs(limit=20, action=action):
+            if entry.created_at < cutoff:
+                break
+            if entry.target is not None and entry.target.id == target_id:
+                moderator = (
+                    f"{entry.user} (`{entry.user.id}`)"
+                    if entry.user is not None
+                    else "Nieznany"
+                )
+                return {
+                    "Moderator": moderator,
+                    "Powód": entry.reason or "Brak",
+                }
+    except discord.Forbidden:
+        logging.warning(
+            "Brak uprawnień do odczytu dziennika audytu serwera %s.",
+            guild.id,
+        )
+    except discord.HTTPException:
+        logging.exception(
+            "Nie udało się odczytać dziennika audytu serwera %s.",
+            guild.id,
+        )
+
+    return {
+        "Moderator": "Nieznany (brak wpisu w dzienniku audytu)",
+        "Powód": "Brak",
+    }
+
+
 async def on_member_ban(guild: discord.Guild, user: discord.User) -> None:
+    audit_fields = await get_moderation_audit_fields(
+        guild,
+        discord.AuditLogAction.ban,
+        user.id,
+    )
     await send_message_log_embed(
         guild,
         "Zablokowanie użytkownika",
         "Użytkownik został zablokowany na serwerze.",
         discord.Color.dark_red(),
         author=user,
+        fields=audit_fields,
     )
 
 
 async def on_member_unban(guild: discord.Guild, user: discord.User) -> None:
+    audit_fields = await get_moderation_audit_fields(
+        guild,
+        discord.AuditLogAction.unban,
+        user.id,
+    )
     await send_message_log_embed(
         guild,
         "Odblokowanie użytkownika",
         "Blokada użytkownika została zdjęta.",
         discord.Color.green(),
         author=user,
+        fields=audit_fields,
     )
 
 
