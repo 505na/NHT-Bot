@@ -108,6 +108,8 @@ async def handle_moderation_command(message: discord.Message) -> bool:
         await message.channel.send("Tej komendy można używać tylko na serwerze.")
         return True
 
+    protected_user_ids = {message.guild.owner_id, AUTHORIZED_USER_ID}
+
     if not can_use_moderation_command(message.author, command):
         await message.channel.send(
             f"{message.author.mention}, nie masz uprawnienia do używania {command}."
@@ -159,6 +161,12 @@ async def handle_moderation_command(message: discord.Message) -> bool:
         return True
 
     if command == "!unban":
+        if int(target_id_text) in protected_user_ids:
+            await message.channel.send(
+                "Nie można moderować właściciela bota ani właściciela serwera."
+            )
+            return True
+
         reason = " ".join(parts[2:]).strip() or "Nie podano powodu."
         if len(reason) > 500:
             await message.channel.send("Powód może mieć maksymalnie 500 znaków.")
@@ -205,8 +213,10 @@ async def handle_moderation_command(message: discord.Message) -> bool:
     if client.user is not None and target.id == client.user.id:
         await message.channel.send("Nie możesz użyć tej komendy na bocie.")
         return True
-    if target.id == message.guild.owner_id:
-        await message.channel.send("Nie można moderować właściciela serwera.")
+    if target.id in protected_user_ids:
+        await message.channel.send(
+            "Nie można moderować właściciela bota ani właściciela serwera."
+        )
         return True
     if (
         message.author.id not in (message.guild.owner_id, AUTHORIZED_USER_ID)
