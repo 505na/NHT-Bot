@@ -308,6 +308,97 @@ async def handle_moderation_command(message: discord.Message) -> bool:
         )
         return True
 
+    if command == "!unwarn":
+        target_user_id = int(target_id_text)
+        if target_user_id == message.author.id:
+            await message.channel.send("Nie możesz moderować siebie.")
+            return True
+        if client.user is not None and target_user_id == client.user.id:
+            await message.channel.send("Nie możesz moderować bota.")
+            return True
+        if target_user_id in protected_user_ids:
+            await message.channel.send(
+                "Nie można moderować właściciela bota ani właściciela serwera."
+            )
+            return True
+
+        warning_number = int(parts[2])
+        try:
+            warning_removed = await asyncio.to_thread(
+                remove_moderation_warning,
+                message.guild.id,
+                target_user_id,
+                warning_number,
+            )
+        except mariadb.Error:
+            await message.channel.send("Nie udało się usunąć ostrzeżenia z bazy danych.")
+            return True
+
+        if not warning_removed:
+            await message.channel.send(
+                f"Nie znaleziono ostrzeżenia #{warning_number} dla użytkownika "
+                f"`{target_user_id}`."
+            )
+            return True
+
+        await send_moderation_log(
+            message,
+            "Usunięcie ostrzeżenia",
+            details={
+                "Użytkownik ID": str(target_user_id),
+                "Numer ostrzeżenia": str(warning_number),
+            },
+        )
+        confirmation = (
+            f"Usunięto ostrzeżenie #{warning_number} dla użytkownika "
+            f"`{target_user_id}`."
+        )
+        try:
+            warning_channel = await client.fetch_channel(WARN_LOG_CHANNEL_ID)
+            if not isinstance(warning_channel, discord.TextChannel):
+                raise TypeError(
+                    f"Kanał ostrzeżeń {WARN_LOG_CHANNEL_ID} nie jest kanałem tekstowym."
+                )
+            warning_embed = discord.Embed(
+                title=f"Usunięto warn #{warning_number}",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow(),
+            )
+            warning_embed.add_field(
+                name="Użytkownik",
+                value=f"<@{target_user_id}> (`{target_user_id}`)",
+                inline=False,
+            )
+            warning_embed.add_field(
+                name="Moderator",
+                value=f"{message.author} (`{message.author.id}`)",
+                inline=False,
+            )
+            await warning_channel.send(
+                embed=warning_embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.NotFound:
+            logging.error("Nie znaleziono kanału ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
+            confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
+        except discord.Forbidden:
+            logging.exception(
+                "Brak dostępu do kanału ostrzeżeń %s.", WARN_LOG_CHANNEL_ID
+            )
+            confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
+        except discord.HTTPException:
+            logging.exception(
+                "Nie udało się wysłać powiadomienia na kanał ostrzeżeń %s.",
+                WARN_LOG_CHANNEL_ID,
+            )
+            confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
+        except TypeError:
+            logging.exception("Nieprawidłowy kanał ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
+            confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
+
+        await message.channel.send(confirmation)
+        return True
+
     if command == "!unban":
         if int(target_id_text) in protected_user_ids:
             await message.channel.send(
@@ -422,7 +513,7 @@ async def handle_moderation_command(message: discord.Message) -> bool:
                 reason=reason,
             )
             confirmation = f"Zdjęto timeout z {target.mention}. Powód: {reason}"
-        elif command == "!warn":
+        else:
             warning_number = await asyncio.to_thread(
                 record_moderation_warning,
                 message.guild.id,
@@ -478,68 +569,6 @@ async def handle_moderation_command(message: discord.Message) -> bool:
             except TypeError:
                 logging.exception("Nieprawidłowy kanał ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
                 confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
-        else:
-            warning_number = int(parts[2])
-            warning_removed = await asyncio.to_thread(
-                remove_moderation_warning,
-                message.guild.id,
-                target.id,
-                warning_number,
-            )
-            if not warning_removed:
-                await message.channel.send(
-                    f"Nie znaleziono ostrzeżenia #{warning_number} dla {target.mention}."
-                )
-                return True
-
-            await send_moderation_log(
-                message,
-                "Usunięcie ostrzeżenia",
-                target=target,
-                details={"Numer ostrzeżenia": str(warning_number)},
-            )
-            confirmation = (
-                f"Usunięto ostrzeżenie #{warning_number} dla {target.mention}."
-            )
-            try:
-                warning_channel = await client.fetch_channel(WARN_LOG_CHANNEL_ID)
-                if not isinstance(warning_channel, discord.TextChannel):
-                    raise TypeError(
-                        f"Kanał ostrzeżeń {WARN_LOG_CHANNEL_ID} nie jest kanałem tekstowym."
-                    )
-                warning_embed = discord.Embed(
-                    title=f"Usunięto warn #{warning_number}",
-                    color=discord.Color.green(),
-                    timestamp=discord.utils.utcnow(),
-                )
-                warning_embed.add_field(
-                    name="Użytkownik",
-                    value=f"{target} (`{target.id}`)",
-                    inline=False,
-                )
-                warning_embed.add_field(
-                    name="Moderator",
-                    value=f"{message.author} (`{message.author.id}`)",
-                    inline=False,
-                )
-                await warning_channel.send(embed=warning_embed)
-            except discord.NotFound:
-                logging.error("Nie znaleziono kanału ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
-                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
-            except discord.Forbidden:
-                logging.exception(
-                    "Brak dostępu do kanału ostrzeżeń %s.", WARN_LOG_CHANNEL_ID
-                )
-                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
-            except discord.HTTPException:
-                logging.exception(
-                    "Nie udało się wysłać powiadomienia na kanał ostrzeżeń %s.",
-                    WARN_LOG_CHANNEL_ID,
-                )
-                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
-            except TypeError:
-                logging.exception("Nieprawidłowy kanał ostrzeżeń %s.", WARN_LOG_CHANNEL_ID)
-                confirmation += " Nie udało się wysłać powiadomienia na kanał ostrzeżeń."
         await message.channel.send(confirmation)
     except discord.Forbidden:
         await message.channel.send(
@@ -549,10 +578,7 @@ async def handle_moderation_command(message: discord.Message) -> bool:
         logging.exception("Nie udało się wykonać komendy %s na użytkowniku %s.", command, target.id)
         await message.channel.send("Nie udało się wykonać tej akcji.")
     except mariadb.Error:
-        if command == "!unwarn":
-            await message.channel.send("Nie udało się usunąć ostrzeżenia z bazy danych.")
-        else:
-            await message.channel.send("Nie udało się zapisać ostrzeżenia w bazie danych.")
+        await message.channel.send("Nie udało się zapisać ostrzeżenia w bazie danych.")
     return True
 
 
