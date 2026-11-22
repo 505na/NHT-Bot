@@ -593,6 +593,27 @@ async def on_ready() -> None:
     global presence_rotation_task
 
     logging.info("Zalogowano jako %s", client.user)
+
+    if slash_command_tree is not None:
+        for guild in client.guilds:
+            try:
+                registered_commands = await slash_command_tree.sync(guild=guild)
+                logging.info(
+                    "Zarejestrowano %s komend slash na serwerze %s.",
+                    len(registered_commands),
+                    guild.id,
+                )
+            except discord.HTTPException:
+                logging.exception(
+                    "Nie udało się zarejestrować komend slash na serwerze %s.",
+                    guild.id,
+                )
+
+        try:
+            await slash_command_tree.sync()
+        except discord.HTTPException:
+            logging.exception("Nie udało się zarejestrować globalnych komend slash.")
+
     try:
         await asyncio.to_thread(tickets.initialize_database_state)
     except (mariadb.Error, OSError, RuntimeError, TypeError, ValueError):
@@ -603,16 +624,6 @@ async def on_ready() -> None:
     for guild in client.guilds:
         for member in guild.members:
             await enforce_restricted_role(member)
-
-    if slash_command_tree is not None:
-        for guild in client.guilds:
-            try:
-                await slash_command_tree.sync(guild=guild)
-            except discord.HTTPException:
-                logging.exception(
-                    "Nie udało się zarejestrować komend slash na serwerze %s.",
-                    guild.id,
-                )
 
     if presence_rotation_task is not None:
         presence_rotation_task.cancel()
