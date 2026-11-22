@@ -38,7 +38,7 @@ PROBOT_ANNOUNCEMENT_TIMEOUT = 15
 RESTRICTED_ROLE_ID = 864505176291016734
 RESTRICTED_ROLE_OWNER_ID = 436860598135816193
 PRESENCE_TEXTS = ("Made by 505na", "Powered by Kotera")
-PRESENCE_ROTATION_SECONDS = 300
+PRESENCE_ROTATION_SECONDS = 60
 
 if not TOKEN:
     raise RuntimeError("Brak DISCORD_TOKEN w pliku .env")
@@ -595,9 +595,14 @@ async def on_ready() -> None:
     logging.info("Zalogowano jako %s", client.user)
 
     if slash_command_tree is not None:
+        try:
+            slash_command_tree.clear_commands(guild=None)
+            await slash_command_tree.sync()
+        except discord.HTTPException:
+            logging.exception("Nie udało się usunąć globalnych komend slash.")
+
         for guild in client.guilds:
             try:
-                slash_command_tree.copy_global_to(guild=guild)
                 registered_commands = await slash_command_tree.sync(guild=guild)
                 logging.info(
                     "Zarejestrowano %s komend slash na serwerze %s.",
@@ -609,15 +614,6 @@ async def on_ready() -> None:
                     "Nie udało się zarejestrować komend slash na serwerze %s.",
                     guild.id,
                 )
-
-        try:
-            registered_global_commands = await slash_command_tree.sync()
-            logging.info(
-                "Zarejestrowano %s globalnych komend slash.",
-                len(registered_global_commands),
-            )
-        except discord.HTTPException:
-            logging.exception("Nie udało się zarejestrować globalnych komend slash.")
 
     try:
         await asyncio.to_thread(tickets.initialize_database_state)
@@ -1723,6 +1719,29 @@ def setup_slash_commands(new_client: discord.Client) -> discord.app_commands.Com
                 for command, description in moderation_help
                 if has_permission(interaction, command)
             )
+            if any(
+                role.id in tickets.RECRUITER_ROLE_IDS
+                for role in getattr(interaction.user, "roles", ())
+            ):
+                commands.append("`/rekru` - wysyła panel rekrutacyjny.")
+            if interaction.user.id in (
+                channel_backup.EXTRA_AUTHORIZED_USER_IDS | {AUTHORIZED_USER_ID}
+            ):
+                commands.extend(
+                    (
+                        "`/backup` - wykonuje backup kanałów.",
+                        "`/restore` - przywraca brakujące kanały i wiadomości.",
+                    )
+                )
+            if interaction.user.id == AUTHORIZED_USER_ID:
+                commands.extend(
+                    (
+                        "`/test` - wysyła test działania bota.",
+                        "`/reload` - uruchamia bota ponownie.",
+                        "`/stop` - zatrzymuje bota.",
+                        "`/update` - aktualizuje bota i uruchamia ponownie.",
+                    )
+                )
         await interaction.response.send_message(
             "\n".join(commands),
             ephemeral=True,
@@ -2017,6 +2036,185 @@ def setup_slash_commands(new_client: discord.Client) -> discord.app_commands.Com
                 inline=True,
             )
         await interaction.followup.send(embed=embed)
+
+    @tree.command(name="rekru", description="Wysyła panel rekrutacyjny.")
+    @discord.app_commands.guild_only()
+    async def slash_rekru(interaction: discord.Interaction) -> None:
+        if not isinstance(interaction.user, discord.Member) or not any(
+            role.id in tickets.RECRUITER_ROLE_IDS
+            for role in interaction.user.roles
+        ):
+            await interaction.response.send_message(
+                "Nie masz uprawnień do używania tej komendy.",
+                ephemeral=True,
+            )
+            return
+        if not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "Tej komendy można używać tylko na kanale tekstowym.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await tickets.send_recruitment_panel(interaction.channel)
+            await interaction.followup.send("Wysłano panel rekrutacyjny.")
+        except discord.HTTPException:
+            await interaction.followup.send("Nie udało się wysłać panelu rekrutacyjnego.")
+
+    @tree.command(name="backup", description="Wykonuje backup kanałów.")
+    @discord.app_commands.guild_only()
+    @discord.app_commands.describe(channel_id="Opcjonalne ID kanału objętego backupem")
+    async def slash_backup(
+        interaction: discord.Interaction,
+        channel_id: str | None = None,
+    ) -> None:
+        if interaction.user.id not in (
+            channel_backup.EXTRA_AUTHORIZED_USER_IDS | {AUTHORIZED_USER_ID}
+        ):
+            await interaction.response.send_message(
+                "Nie masz uprawnień do wykonania backupu.",
+                ephemeral=True,
+            )
+            return
+
+        source_channel_ids: tuple[int, ...] | None = None
+        if channel_id is not None:
+            if not channel_id.isdigit():
+                await interaction.response.send_message(
+                    "Podaj poprawne ID kanału.",
+                    ephemeral=True,
+                )
+                return
+            selected_id = int(channel_id)
+            if selected_id not in channel_backup.SOURCE_CHANNEL_IDS:
+                await interaction.response.send_message(
+                    "Ten kanał nie znajduje się na liście kanałów objętych backupem.",
+                    ephemeral=True,
+                )
+                return
+            source_channel_ids = (selected_id,)
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            copied, updated, skipped = await channel_backup.backup_channels(
+                new_client,
+                source_channel_ids,
+            )
+            await interaction.followup.send(
+                f"Backup zakończony. Skopiowane: {copied}, "
+                f"zaktualizowane: {updated}, pominięte: {skipped}."
+            )
+        except (discord.HTTPException, OSError, RuntimeError, ValueError) as error:
+            logging.exception("Slash backup kanałów nie powiódł się.")
+            await interaction.followup.send(
+                f"Backup nie powiódł się. Powód: `{error}`"
+            )
+
+    @tree.command(name="restore", description="Przywraca brakujące kanały i wiadomości.")
+    @discord.app_commands.guild_only()
+    async def slash_restore(interaction: discord.Interaction) -> None:
+        if interaction.user.id not in (
+            channel_backup.EXTRA_AUTHORIZED_USER_IDS | {AUTHORIZED_USER_ID}
+        ):
+            await interaction.response.send_message(
+                "Nie masz uprawnień do przywracania kanałów.",
+                ephemeral=True,
+            )
+            return
+        if (
+            interaction.guild is None
+            or interaction.guild.id != channel_backup.SOURCE_GUILD_ID
+        ):
+            await interaction.response.send_message(
+                "Tej komendy można użyć tylko na serwerze bazowym.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            channels, messages, skipped = await channel_backup.restore_missing_channels(
+                new_client
+            )
+            await interaction.followup.send(
+                "Przywracanie zakończone. "
+                f"Nowe kanały: {channels}, odtworzone wiadomości: {messages}, "
+                f"kanały bez dostępnej kopii: {skipped}."
+            )
+        except (discord.HTTPException, OSError, RuntimeError, ValueError) as error:
+            logging.exception("Slash restore kanałów nie powiódł się.")
+            await interaction.followup.send(
+                f"Przywracanie nie powiodło się. Powód: `{error}`"
+            )
+
+    @tree.command(name="test", description="Wysyła test działania bota.")
+    async def slash_test(interaction: discord.Interaction) -> None:
+        if interaction.user.id != AUTHORIZED_USER_ID:
+            await interaction.response.send_message(
+                "Nie masz uprawnień do używania tej komendy.",
+                ephemeral=True,
+            )
+            return
+        test_channel = new_client.get_channel(TEST_CHANNEL_ID)
+        if not isinstance(test_channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "Nie znaleziono kanału testowego.",
+                ephemeral=True,
+            )
+            return
+        latency_ms = round(new_client.latency * 1000)
+        await test_channel.send(
+            f"Test bota zakończony pomyślnie. Bot działa poprawnie. "
+            f"Opóźnienie: {latency_ms} ms."
+        )
+        await interaction.response.send_message(
+            "Wysłano test działania bota.",
+            ephemeral=True,
+        )
+
+    @tree.command(name="reload", description="Ponownie uruchamia bota.")
+    async def slash_reload(interaction: discord.Interaction) -> None:
+        if interaction.user.id != AUTHORIZED_USER_ID:
+            await interaction.response.send_message(
+                "Nie masz uprawnień do używania tej komendy.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message("Przeładowuję bota...")
+        await new_client.close()
+        reload_bot()
+
+    @tree.command(name="stop", description="Zatrzymuje bota.")
+    async def slash_stop(interaction: discord.Interaction) -> None:
+        if interaction.user.id != AUTHORIZED_USER_ID:
+            await interaction.response.send_message(
+                "Nie masz uprawnień do używania tej komendy.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message("Zatrzymuję bota...")
+        await new_client.close()
+        os._exit(0)
+
+    @tree.command(name="update", description="Aktualizuje bota i uruchamia ponownie.")
+    async def slash_update(interaction: discord.Interaction) -> None:
+        if interaction.user.id != AUTHORIZED_USER_ID:
+            await interaction.response.send_message(
+                "Nie masz uprawnień do używania tej komendy.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        result = await asyncio.to_thread(update_bot)
+        output = (result.stdout + result.stderr).strip()
+        if result.returncode != 0:
+            await interaction.followup.send(
+                f"Aktualizacja nie powiodła się:\n```{output or 'brak danych'}```"
+            )
+            return
+        await interaction.followup.send("Bot został zaktualizowany. Przeładowuję...")
+        await new_client.close()
+        reload_bot()
 
     @tree.command(name="clear", description="Usuwa wiadomości z kanału.")
     @discord.app_commands.guild_only()
