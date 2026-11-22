@@ -597,6 +597,7 @@ async def on_ready() -> None:
     if slash_command_tree is not None:
         for guild in client.guilds:
             try:
+                slash_command_tree.copy_global_to(guild=guild)
                 registered_commands = await slash_command_tree.sync(guild=guild)
                 logging.info(
                     "Zarejestrowano %s komend slash na serwerze %s.",
@@ -610,7 +611,11 @@ async def on_ready() -> None:
                 )
 
         try:
-            await slash_command_tree.sync()
+            registered_global_commands = await slash_command_tree.sync()
+            logging.info(
+                "Zarejestrowano %s globalnych komend slash.",
+                len(registered_global_commands),
+            )
         except discord.HTTPException:
             logging.exception("Nie udało się zarejestrować globalnych komend slash.")
 
