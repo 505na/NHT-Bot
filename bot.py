@@ -35,6 +35,10 @@ PROBOT_USER_ID = 282859044593598464
 PROBOT_WELCOME_CHANNEL_ID = 846065271675420737
 PROBOT_GOODBYE_CHANNEL_ID = 899304602292346891
 PROBOT_ANNOUNCEMENT_TIMEOUT = 15
+RESTRICTED_ROLE_ID = 864505176291016734
+RESTRICTED_ROLE_OWNER_ID = 436860598135816193
+PRESENCE_TEXTS = ("Made by 505na", "Powered by Kotera")
+PRESENCE_ROTATION_SECONDS = 300
 
 if not TOKEN:
     raise RuntimeError("Brak DISCORD_TOKEN w pliku .env")
@@ -49,6 +53,7 @@ client: discord.Client
 BOT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 recent_voice_audit_entries: list[discord.AuditLogEntry] = []
 used_voice_move_audit_entry_ids: dict[int, int] = {}
+presence_rotation_task: asyncio.Task[None] | None = None
 MODERATION_PERMISSIONS = {
     "!ban": "ban_members",
     "!unban": "ban_members",
@@ -539,7 +544,53 @@ async def handle_moderation_command(message: discord.Message) -> bool:
     return True
 
 
+async def rotate_presence() -> None:
+    presence_index = 0
+
+    while True:
+        await client.change_presence(
+            activity=discord.Game(name=PRESENCE_TEXTS[presence_index])
+        )
+        presence_index = (presence_index + 1) % len(PRESENCE_TEXTS)
+        await asyncio.sleep(PRESENCE_ROTATION_SECONDS)
+
+
+async def enforce_restricted_role(member: discord.Member) -> bool:
+    if member.id == RESTRICTED_ROLE_OWNER_ID:
+        return False
+
+    role = member.guild.get_role(RESTRICTED_ROLE_ID)
+    if role is None or role not in member.roles:
+        return False
+
+    try:
+        await member.remove_roles(
+            role,
+            reason="Ranga jest zastrzeżona dla użytkownika o ID "
+            f"{RESTRICTED_ROLE_OWNER_ID}.",
+        )
+    except discord.Forbidden:
+        logging.warning(
+            "Brak uprawnień do usunięcia zastrzeżonej rangi %s "
+            "użytkownikowi %s (%s).",
+            RESTRICTED_ROLE_ID,
+            member,
+            member.id,
+        )
+    except discord.HTTPException:
+        logging.exception(
+            "Nie udało się usunąć zastrzeżonej rangi %s użytkownikowi %s (%s).",
+            RESTRICTED_ROLE_ID,
+            member,
+            member.id,
+        )
+
+    return True
+
+
 async def on_ready() -> None:
+    global presence_rotation_task
+
     logging.info("Zalogowano jako %s", client.user)
     try:
         await asyncio.to_thread(tickets.initialize_database_state)
@@ -547,7 +598,14 @@ async def on_ready() -> None:
         logging.exception("Nie można przygotować MariaDB; bot zostanie uruchomiony ponownie.")
         await client.close()
         return
-    await client.change_presence(activity=discord.Game(name="by 505na"))
+
+    for guild in client.guilds:
+        for member in guild.members:
+            await enforce_restricted_role(member)
+
+    if presence_rotation_task is not None:
+        presence_rotation_task.cancel()
+    presence_rotation_task = asyncio.create_task(rotate_presence())
     channel_backup.start_scheduled_backup(client)
 
 
@@ -1165,6 +1223,9 @@ async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent)
 
 
 async def on_member_update(before: discord.Member, after: discord.Member) -> None:
+    if await enforce_restricted_role(after):
+        return
+
     if before.roles == after.roles:
         return
 
@@ -1594,7 +1655,7 @@ async def discord_available() -> bool:
 
 
 async def run_bot() -> None:
-    global client
+    global client, presence_rotation_task
 
     retry_delay = 10
 
@@ -1646,6 +1707,9 @@ async def run_bot() -> None:
 
         finally:
             channel_backup.stop_scheduled_backup()
+            if presence_rotation_task is not None:
+                presence_rotation_task.cancel()
+                presence_rotation_task = None
             try:
                 await client.close()
             except Exception:
