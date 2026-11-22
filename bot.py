@@ -54,6 +54,7 @@ BOT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 recent_voice_audit_entries: list[discord.AuditLogEntry] = []
 used_voice_move_audit_entry_ids: dict[int, int] = {}
 presence_rotation_task: asyncio.Task[None] | None = None
+slash_command_tree: discord.app_commands.CommandTree | None = None
 MODERATION_PERMISSIONS = {
     "!ban": "ban_members",
     "!unban": "ban_members",
@@ -602,6 +603,16 @@ async def on_ready() -> None:
     for guild in client.guilds:
         for member in guild.members:
             await enforce_restricted_role(member)
+
+    if slash_command_tree is not None:
+        for guild in client.guilds:
+            try:
+                await slash_command_tree.sync(guild=guild)
+            except discord.HTTPException:
+                logging.exception(
+                    "Nie udało się zarejestrować komend slash na serwerze %s.",
+                    guild.id,
+                )
 
     if presence_rotation_task is not None:
         presence_rotation_task.cancel()
@@ -1622,8 +1633,413 @@ async def on_member_unban(guild: discord.Guild, user: discord.User) -> None:
     )
 
 
+def setup_slash_commands(new_client: discord.Client) -> discord.app_commands.CommandTree:
+    tree = discord.app_commands.CommandTree(new_client)
+
+    def has_permission(interaction: discord.Interaction, command: str) -> bool:
+        if interaction.user.id == AUTHORIZED_USER_ID:
+            return True
+        return (
+            isinstance(interaction.user, discord.Member)
+            and getattr(
+                interaction.user.guild_permissions,
+                MODERATION_PERMISSIONS[command],
+            )
+        )
+
+    async def reject_unless_allowed(
+        interaction: discord.Interaction,
+        command: str,
+    ) -> bool:
+        if has_permission(interaction, command):
+            return True
+        await interaction.response.send_message(
+            "Nie masz uprawnienia do używania tej komendy.",
+            ephemeral=True,
+        )
+        return False
+
+    def can_target(
+        interaction: discord.Interaction,
+        target: discord.Member,
+    ) -> str | None:
+        if interaction.guild is None:
+            return "Tej komendy można używać tylko na serwerze."
+        if target.id == interaction.user.id:
+            return "Nie możesz użyć tej komendy na sobie."
+        if client.user is not None and target.id == client.user.id:
+            return "Nie możesz użyć tej komendy na bocie."
+        if target.id in {interaction.guild.owner_id, AUTHORIZED_USER_ID}:
+            return "Nie można moderować właściciela bota ani właściciela serwera."
+        if (
+            interaction.user.id not in (interaction.guild.owner_id, AUTHORIZED_USER_ID)
+            and isinstance(interaction.user, discord.Member)
+            and target.top_role >= interaction.user.top_role
+        ):
+            return "Nie możesz moderować osoby z równą lub wyższą rolą."
+        return None
+
+    @tree.command(name="ping", description="Sprawdza działanie bota.")
+    async def ping(interaction: discord.Interaction) -> None:
+        await interaction.response.send_message("Pong!", ephemeral=True)
+
+    @tree.command(name="cmd", description="Wyświetla dostępne komendy slash.")
+    async def slash_commands(interaction: discord.Interaction) -> None:
+        commands = [
+            "`/ping` - sprawdza działanie bota.",
+            "`/cmd` - wyświetla tę listę.",
+        ]
+        if isinstance(interaction.user, discord.Member):
+            moderation_help = (
+                ("!ban", "`/ban` - blokuje użytkownika."),
+                ("!unban", "`/unban` - usuwa blokadę użytkownika."),
+                ("!kick", "`/kick` - wyrzuca użytkownika."),
+                ("!timeout", "`/timeout` - nakłada timeout."),
+                ("!untimeout", "`/untimeout` - usuwa timeout."),
+                ("!warn", "`/warn` - zapisuje ostrzeżenie."),
+                ("!unwarn", "`/unwarn` - usuwa ostrzeżenie."),
+                ("!warnlist", "`/warnlist` - wyświetla ostrzeżenia."),
+                ("!banlist", "`/banlist` - wyświetla bany."),
+                ("!clear", "`/clear` - usuwa wiadomości."),
+            )
+            commands.extend(
+                description
+                for command, description in moderation_help
+                if has_permission(interaction, command)
+            )
+        await interaction.response.send_message(
+            "\n".join(commands),
+            ephemeral=True,
+        )
+
+    @tree.command(name="ban", description="Blokuje użytkownika.")
+    @discord.app_commands.guild_only()
+    @discord.app_commands.describe(
+        target="Użytkownik do zablokowania",
+        reason="Powód blokady",
+    )
+    async def slash_ban(
+        interaction: discord.Interaction,
+        target: discord.Member,
+        reason: str = "Nie podano powodu.",
+    ) -> None:
+        if not await reject_unless_allowed(interaction, "!ban"):
+            return
+        target_error = can_target(interaction, target)
+        if target_error:
+            await interaction.response.send_message(target_error, ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await target.ban(reason=reason)
+            await interaction.followup.send(f"Zbanowano {target.mention}.")
+        except discord.Forbidden:
+            await interaction.followup.send("Bot nie ma uprawnień do zablokowania tego użytkownika.")
+        except discord.HTTPException:
+            await interaction.followup.send("Nie udało się zablokować tego użytkownika.")
+
+    @tree.command(name="unban", description="Usuwa blokadę użytkownika.")
+    @discord.app_commands.guild_only()
+    @discord.app_commands.describe(
+        user_id="ID użytkownika",
+        reason="Powód odbanowania",
+    )
+    async def slash_unban(
+        interaction: discord.Interaction,
+        user_id: str,
+        reason: str = "Nie podano powodu.",
+    ) -> None:
+        if not await reject_unless_allowed(interaction, "!unban"):
+            return
+        if interaction.guild is None or not user_id.isdigit():
+            await interaction.response.send_message(
+                "Podaj poprawne ID użytkownika.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            user = await new_client.fetch_user(int(user_id))
+            await interaction.guild.unban(user, reason=reason)
+            await interaction.followup.send(f"Odblokowano {user} (`{user.id}`).")
+        except discord.NotFound:
+            await interaction.followup.send("Ten użytkownik nie jest zbanowany na tym serwerze.")
+        except discord.Forbidden:
+            await interaction.followup.send("Bot nie ma uprawnień do odbanowywania użytkowników.")
+        except discord.HTTPException:
+            await interaction.followup.send("Nie udało się odblokować tego użytkownika.")
+
+    @tree.command(name="kick", description="Wyrzuca użytkownika.")
+    @discord.app_commands.guild_only()
+    @discord.app_commands.describe(
+        target="Użytkownik do wyrzucenia",
+        reason="Powód wyrzucenia",
+    )
+    async def slash_kick(
+        interaction: discord.Interaction,
+        target: discord.Member,
+        reason: str = "Nie podano powodu.",
+    ) -> None:
+        if not await reject_unless_allowed(interaction, "!kick"):
+            return
+        target_error = can_target(interaction, target)
+        if target_error:
+            await interaction.response.send_message(target_error, ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await target.kick(reason=reason)
+            await interaction.followup.send(f"Wyrzucono {target.mention}.")
+        except discord.Forbidden:
+            await interaction.followup.send("Bot nie ma uprawnień do wyrzucenia tego użytkownika.")
+        except discord.HTTPException:
+            await interaction.followup.send("Nie udało się wyrzucić tego użytkownika.")
+
+    @tree.command(name="timeout", description="Nakłada timeout na użytkownika.")
+    @discord.app_commands.guild_only()
+    @discord.app_commands.describe(
+        target="Użytkownik poddany timeoutowi",
+        minutes="Czas trwania od 1 do 40320 minut",
+        reason="Powód timeoutu",
+    )
+    async def slash_timeout(
+        interaction: discord.Interaction,
+        target: discord.Member,
+        minutes: int,
+        reason: str = "Nie podano powodu.",
+    ) -> None:
+        if not await reject_unless_allowed(interaction, "!timeout"):
+            return
+        target_error = can_target(interaction, target)
+        if target_error:
+            await interaction.response.send_message(target_error, ephemeral=True)
+            return
+        if not 1 <= minutes <= 28 * 24 * 60:
+            await interaction.response.send_message(
+                "Timeout musi trwać od 1 minuty do 28 dni.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await target.timeout(timedelta(minutes=minutes), reason=reason)
+            await interaction.followup.send(
+                f"Nałożono timeout na {target.mention} na {minutes} min."
+            )
+        except discord.Forbidden:
+            await interaction.followup.send("Bot nie ma uprawnień do nałożenia timeoutu.")
+        except discord.HTTPException:
+            await interaction.followup.send("Nie udało się nałożyć timeoutu.")
+
+    @tree.command(name="untimeout", description="Usuwa timeout użytkownikowi.")
+    @discord.app_commands.guild_only()
+    @discord.app_commands.describe(
+        target="Użytkownik, któremu zdjąć timeout",
+        reason="Powód zdjęcia timeoutu",
+    )
+    async def slash_untimeout(
+        interaction: discord.Interaction,
+        target: discord.Member,
+        reason: str = "Nie podano powodu.",
+    ) -> None:
+        if not await reject_unless_allowed(interaction, "!untimeout"):
+            return
+        target_error = can_target(interaction, target)
+        if target_error:
+            await interaction.response.send_message(target_error, ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await target.timeout(None, reason=reason)
+            await interaction.followup.send(f"Zdjęto timeout z {target.mention}.")
+        except discord.Forbidden:
+            await interaction.followup.send("Bot nie ma uprawnień do zdjęcia timeoutu.")
+        except discord.HTTPException:
+            await interaction.followup.send("Nie udało się zdjąć timeoutu.")
+
+    @tree.command(name="warn", description="Zapisuje ostrzeżenie użytkownikowi.")
+    @discord.app_commands.guild_only()
+    @discord.app_commands.describe(
+        target="Użytkownik do ostrzeżenia",
+        reason="Powód ostrzeżenia",
+    )
+    async def slash_warn(
+        interaction: discord.Interaction,
+        target: discord.Member,
+        reason: str = "Nie podano powodu.",
+    ) -> None:
+        if not await reject_unless_allowed(interaction, "!warn"):
+            return
+        target_error = can_target(interaction, target)
+        if target_error:
+            await interaction.response.send_message(target_error, ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("Brak serwera.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            warning_number = await asyncio.to_thread(
+                record_moderation_warning,
+                interaction.guild.id,
+                target.id,
+                interaction.user.id,
+                reason,
+            )
+            await interaction.followup.send(
+                f"Ostrzeżono {target.mention}. Numer ostrzeżenia: **{warning_number}**."
+            )
+        except mariadb.Error:
+            await interaction.followup.send("Nie udało się zapisać ostrzeżenia.")
+
+    @tree.command(name="unwarn", description="Usuwa ostrzeżenie użytkownika.")
+    @discord.app_commands.guild_only()
+    @discord.app_commands.describe(
+        target="Użytkownik",
+        warning_number="Numer ostrzeżenia",
+    )
+    async def slash_unwarn(
+        interaction: discord.Interaction,
+        target: discord.Member,
+        warning_number: int,
+    ) -> None:
+        if not await reject_unless_allowed(interaction, "!unwarn"):
+            return
+        target_error = can_target(interaction, target)
+        if target_error:
+            await interaction.response.send_message(target_error, ephemeral=True)
+            return
+        if warning_number < 1 or interaction.guild is None:
+            await interaction.response.send_message(
+                "Podaj poprawny numer ostrzeżenia.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            removed = await asyncio.to_thread(
+                remove_moderation_warning,
+                interaction.guild.id,
+                target.id,
+                warning_number,
+            )
+            if removed:
+                await interaction.followup.send(
+                    f"Usunięto ostrzeżenie #{warning_number} użytkownika {target.mention}."
+                )
+            else:
+                await interaction.followup.send("Nie znaleziono takiego ostrzeżenia.")
+        except mariadb.Error:
+            await interaction.followup.send("Nie udało się usunąć ostrzeżenia.")
+
+    @tree.command(name="warnlist", description="Wyświetla ostrzeżenia.")
+    @discord.app_commands.guild_only()
+    @discord.app_commands.describe(target="Opcjonalny użytkownik")
+    async def slash_warnlist(
+        interaction: discord.Interaction,
+        target: discord.Member | None = None,
+    ) -> None:
+        if not await reject_unless_allowed(interaction, "!warnlist"):
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("Brak serwera.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            warnings = await asyncio.to_thread(
+                get_moderation_warnings,
+                interaction.guild.id,
+                target.id if target is not None else None,
+            )
+        except mariadb.Error:
+            await interaction.followup.send("Nie udało się pobrać ostrzeżeń.")
+            return
+        if not warnings:
+            await interaction.followup.send("Nie znaleziono żadnych ostrzeżeń.")
+            return
+        embed = discord.Embed(
+            title="Lista ostrzeżeń",
+            color=discord.Color.orange(),
+        )
+        for warning_number, user_id, moderator_id, reason, created_at in warnings[:25]:
+            embed.add_field(
+                name=f"Ostrzeżenie #{warning_number} • Użytkownik {user_id}",
+                value=(
+                    f"**Moderator:** <@{moderator_id}> (`{moderator_id}`)\n"
+                    f"**Data:** {created_at:%d.%m.%Y %H:%M}\n"
+                    f"**Powód:** {reason}"
+                ),
+                inline=False,
+            )
+        await interaction.followup.send(embed=embed)
+
+    @tree.command(name="banlist", description="Wyświetla listę zbanowanych użytkowników.")
+    @discord.app_commands.guild_only()
+    async def slash_banlist(interaction: discord.Interaction) -> None:
+        if not await reject_unless_allowed(interaction, "!banlist"):
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("Brak serwera.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            bans = [ban async for ban in interaction.guild.bans(limit=None)]
+        except discord.Forbidden:
+            await interaction.followup.send("Bot nie ma uprawnień do wyświetlenia listy banów.")
+            return
+        except discord.HTTPException:
+            await interaction.followup.send("Nie udało się pobrać listy banów.")
+            return
+        if not bans:
+            await interaction.followup.send("Na tym serwerze nie ma żadnych banów.")
+            return
+        embed = discord.Embed(title=f"Lista banów • {len(bans)}", color=discord.Color.dark_red())
+        for ban_entry in bans[:25]:
+            embed.add_field(
+                name=str(ban_entry.user),
+                value=f"`{ban_entry.user.id}`",
+                inline=True,
+            )
+        await interaction.followup.send(embed=embed)
+
+    @tree.command(name="clear", description="Usuwa wiadomości z kanału.")
+    @discord.app_commands.guild_only()
+    @discord.app_commands.describe(count="Liczba wiadomości od 1 do 100")
+    async def slash_clear(
+        interaction: discord.Interaction,
+        count: int,
+    ) -> None:
+        if not await reject_unless_allowed(interaction, "!clear"):
+            return
+        if not 1 <= count <= 100:
+            await interaction.response.send_message(
+                "Możesz usunąć od 1 do 100 wiadomości.",
+                ephemeral=True,
+            )
+            return
+        if not isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
+            await interaction.response.send_message(
+                "Tej komendy można używać tylko na kanale tekstowym.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            deleted = await interaction.channel.purge(limit=count)
+            await interaction.followup.send(f"Usunięto {len(deleted)} wiadomości.")
+        except discord.Forbidden:
+            await interaction.followup.send("Bot nie ma uprawnień do usuwania wiadomości.")
+        except discord.HTTPException:
+            await interaction.followup.send("Nie udało się usunąć wiadomości.")
+
+    return tree
+
+
 def create_client() -> discord.Client:
+    global slash_command_tree
+
     new_client = discord.Client(intents=intents)
+    slash_command_tree = setup_slash_commands(new_client)
     tickets.register_ticket_views(new_client)
     new_client.event(on_ready)
     new_client.event(on_message)
